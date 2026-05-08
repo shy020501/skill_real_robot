@@ -10,7 +10,7 @@ class MLPProj(nn.Module):
         h: latent embedding (B, H)
     """
 
-    def __init__(self, input_size, output_size, hidden_size=None, num_layers=1, dropout=0.0):
+    def __init__(self, input_size, output_size, hidden_size=None, num_layers=1, dropout=0.0, input_name=None):
         super().__init__()
         assert num_layers >= 1, "[error] num_layers < 1"
         sizes = [input_size] + [hidden_size] * (num_layers - 1) + [output_size]

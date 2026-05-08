@@ -58,7 +58,7 @@ class Policy(nn.Module, ABC):
         self.lowdim_encoders = {}
         if do_lowdim and shape_meta['observation']['lowdim'] is not None:
             for name, shape in shape_meta['observation']['lowdim'].items():
-                encoder = lowdim_encoder_factory(shape)
+                encoder = lowdim_encoder_factory(shape, input_name=name)
                 total_obs_channels += encoder.out_channels
                 if obs_reduction == 'stack' and encoder.out_channels != embed_dim:
                     encoder = nn.Sequential(
@@ -224,4 +224,3 @@ class ChunkPolicy(Policy):
     @abstractmethod
     def sample_actions(self, obs):
         raise NotImplementedError('Implement in subclass')
-

@@ -24,7 +24,7 @@ shape_meta:
         - ${task.img_height}
         - ${task.img_width}
     lowdim:
-      right_state_force_history: 76
+      right_state_force_history: 73
   task:
     type: vector
     dim: 512

@@ -28,7 +28,7 @@ IMAGE_KEYS = {"front_cam", "right_wrist_cam"}
 FORCE_HISTORY_KEYS = ("right_force_history", "force_history")
 RIGHT_STATE_KEYS = ("state", "right_state")
 RIGHT_STATE_FORCE_HISTORY_KEY = "right_state_force_history"
-RIGHT_STATE_FORCE_IDXS = (1, 2, 3)
+RIGHT_STATE_FORCE_TORQUE_IDXS = (1, 2, 3, 10, 11, 12)
 PKL_RIGHT_GRIPPER_STATE_IDX = 19
 PKL_RIGHT_GRIPPER_ACTION_IDX = 13
 PARQUET_GRIPPER_STATE_IDX = 6
@@ -258,7 +258,7 @@ def get_right_state_value(obs_t, remove_force=False):
         arr = arr[0]
     right_state = arr[19:].astype(np.float32)
     if remove_force:
-        right_state = np.delete(right_state, RIGHT_STATE_FORCE_IDXS, axis=0)
+        right_state = np.delete(right_state, RIGHT_STATE_FORCE_TORQUE_IDXS, axis=0)
     return right_state
 
 
