@@ -51,12 +51,12 @@ case "${variant_key}" in
     quest)
         algo="quest"
         algo_name="quest"
-        variant="block_32_ds_4_quest"
+        variant="masked_block_32_ds_4_quest"
         ;;
     max|avg|avg_max|conv)
         algo="quest_ft_adaln"
         algo_name="quest_ft_adaln"
-        variant="block_32_ds_4_ft_${variant_key}"
+        variant="masked_block_32_ds_4_ft_${variant_key}"
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
         run_key="${variant_key}_${ft_label}"

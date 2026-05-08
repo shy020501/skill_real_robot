@@ -133,8 +133,8 @@ def smooth_ft_sequence(data, median_kernel=5, ema_alpha=0.3):
     for axis in range(data.shape[1]):
         x = data[:, axis]
         # To re-enable median filtering, uncomment this block.
-        # if median_kernel is not None and median_kernel > 1:
-        #     x = median_filter_1d(x, kernel_size=median_kernel)
+        if median_kernel is not None and median_kernel > 1:
+            x = median_filter_1d(x, kernel_size=median_kernel)
         if ema_alpha is not None:
             x = ema_filter_1d(x, alpha=ema_alpha)
         smoothed[:, axis] = x
@@ -341,8 +341,8 @@ def build_episode_masked_ft(episode, stats, config=None, state_key=STATE_KEY):
         ema_alpha=config["ema_alpha"],
     )
     # To re-enable score/threshold masking and zero-masking, uncomment these two lines and remove the all-ones mask assignment below.
-    # _, mask = compute_mask_sequence(smoothed, config=config)
-    # masked_ft = smoothed * mask.astype(np.float32)
-    mask = np.ones_like(smoothed, dtype=bool)
-    masked_ft = smoothed
+    _, mask = compute_mask_sequence(smoothed, config=config)
+    masked_ft = smoothed * mask.astype(np.float32)
+    # mask = np.ones_like(smoothed, dtype=bool)
+    # masked_ft = smoothed
     return masked_ft.astype(np.float32), mask.astype(np.float32), smoothed.astype(np.float32)
