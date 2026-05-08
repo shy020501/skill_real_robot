@@ -79,11 +79,6 @@ def main(cfg):
         cfg.train_dataloader, 
         dataset=dataset)
 
-
-    if cfg.rollout.enabled:
-        env_runner = instantiate(cfg.task.env_runner)
-        # rollout_results = env_runner.run(model, n_video=cfg.rollout.n_video, do_tqdm=train_cfg.use_tqdm) # for debugging env runner before starting training
-    
     print('Saving to:', experiment_dir)
     print('Experiment name:', experiment_name)
 
@@ -178,12 +173,6 @@ def main(cfg):
                 'config': OmegaConf.to_container(cfg, resolve=True)
             }, model_checkpoint_name_ep)
 
-        if cfg.rollout.enabled and epoch > 0 and epoch % cfg.rollout.interval == 0:
-            rollout_results = env_runner.run(model, n_video=cfg.rollout.n_video, do_tqdm=train_cfg.use_tqdm)
-            print(
-                f"[info]     success rate: {rollout_results['rollout']['overall_success_rate']:1.3f} \
-                    | environments solved: {rollout_results['rollout']['environments_solved']}")
-            logger.log(rollout_results, step=steps)
         [scheduler.step() for scheduler in schedulers]
     print("[info] finished learning\n")
     wandb.finish()

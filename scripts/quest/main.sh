@@ -2,7 +2,7 @@
 # This script is used to train stage 1 i.e. the gpt-like transformer prior of Quest
 
 python train.py --config-name=train_prior.yaml \
-    task=libero_90 \
+    task=real_robot \
     algo=quest \
     exp_name=final \
     variant_name=block_32_ds_4 \
@@ -15,9 +15,9 @@ python train.py --config-name=train_prior.yaml \
     algo.skill_block_size=32 \
     algo.downsample_factor=4 \
     training.auto_continue=true \
-    rollout.num_parallel_envs=5 \
-    rollout.rollouts_per_env=5 \
-    seed=0
+    seed=0 \
+    data_prefix=/home/seunghyo/real_robot/demos \
+    device=cuda:3
 
 # Note1: training.auto_continue will automatically load the latest checkpoint from the previous training stage.
 #        Else you can specify the checkpoint_path to load a specific checkpoint.

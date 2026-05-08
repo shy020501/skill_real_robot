@@ -20,7 +20,7 @@ checkpoint_path: null
 
 train_dataloader:
   _target_: torch.utils.data.DataLoader
-  batch_size: 128
+  batch_size: 512
   shuffle: true
   num_workers: 6
   persistent_workers: false
@@ -31,7 +31,7 @@ train_dataloader:
 training:
   n_epochs: 100
   grad_clip: 100.
-  save_interval: 10
+  save_interval: 5
   log_interval: 100
   use_amp: false
   use_tqdm: true
@@ -46,7 +46,7 @@ training:
   resume_path: ""
 
 rollout:
-  enabled: true
+  enabled: false # true
   interval: 10
   rollouts_per_env: 1
   max_episode_length: ${task.horizon}
@@ -57,10 +57,9 @@ rollout:
 logging:
   group: null
   mode: online # set logging.mode=disabled to disable wandb
-  project: quest # TODO: change this to your wandb project name
+  project: "[Real Robot] QueST"
   resume: true
   save_code: true
-
 
 
 

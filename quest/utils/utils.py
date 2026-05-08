@@ -107,7 +107,6 @@ def safe_device(x, device="cpu"):
             return x.cpu()
 
 def extract_state_dicts(inp):
-
     if not (isinstance(inp, dict) or isinstance(inp, list)):
         if hasattr(inp, 'state_dict'):
             return inp.state_dict()

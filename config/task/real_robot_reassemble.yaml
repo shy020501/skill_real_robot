@@ -1,0 +1,45 @@
+
+suite_name: real_robot
+benchmark_name: REAL_ROBOT_ASSEMBLE
+mode: all
+n_tasks: 68
+demos_per_env: null
+
+task_embedding_format: clip
+img_height: 240
+img_width: 320
+horizon: 600
+
+shape_meta:
+  action_dim: 7
+  observation:
+    rgb: {}
+    # rgb:
+    #   wrist_image_left:
+    #     - 3
+    #     - ${task.img_height}
+    #     - ${task.img_width}
+      # exterior_image_1_left:
+      #   - 3
+      #   - ${task.img_height}
+      #   - ${task.img_width}
+      # exterior_image_2_left:
+      #   - 3
+      #   - ${task.img_height}
+      #   - ${task.img_width}
+    lowdim:
+      state: 7   # eef_pose(6) + gripper(1)
+  task:
+    type: vector
+    dim: 512
+
+dataset:
+  _target_: quest.utils.real_robot_rlds_utils.build_realworld_rlds_dataset
+  data_prefix: ${data_prefix}
+  seq_len: ${algo.dataset.seq_len}
+  frame_stack: ${algo.dataset.frame_stack}
+  obs_seq_len: ${algo.dataset.obs_seq_len}
+  shape_meta: ${task.shape_meta}
+  task_embedding_format: ${task.task_embedding_format}
+  combine_lowdim_as_state: true
+  min_episodes_per_task: 1

@@ -60,6 +60,7 @@ class SkillVAE(nn.Module):
         self.encoder_dim = encoder_dim
         self.decoder_dim = decoder_dim
         self.skill_block_size = skill_block_size
+        self.downsample_factor = downsample_factor
         self.use_causal_encoder = use_causal_encoder
         self.use_causal_decoder = use_causal_decoder
         self.vq_type = vq_type
@@ -172,6 +173,228 @@ class SkillVAE(nn.Module):
     @property
     def device(self):
         return next(self.parameters()).device
+
+
+class AdaLNTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, cond_dim, dim_feedforward, dropout, activation='gelu'):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model,
+            nhead,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.activation = F.gelu if activation == 'gelu' else F.relu
+
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cond_dim, 6 * d_model),
+        )
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+
+    def _modulate(self, x, shift, scale):
+        return x * (1.0 + scale) + shift
+
+    def forward(self, src, cond, src_mask=None, is_causal=False):
+        gate_attn, shift_attn, scale_attn, gate_ffn, shift_ffn, scale_ffn = (
+            self.adaLN_modulation(cond).chunk(6, dim=-1)
+        )
+
+        attn_in = self._modulate(self.norm1(src), shift_attn, scale_attn)
+        attn_out = self.self_attn(
+            attn_in,
+            attn_in,
+            attn_in,
+            attn_mask=src_mask,
+            need_weights=False,
+            is_causal=is_causal,
+        )[0]
+        src = src + (1.0 + gate_attn) * self.dropout1(attn_out)
+
+        ffn_in = self._modulate(self.norm2(src), shift_ffn, scale_ffn)
+        ffn_out = self.linear2(self.dropout(self.activation(self.linear1(ffn_in))))
+        src = src + (1.0 + gate_ffn) * self.dropout2(ffn_out)
+        return src
+
+
+class AdaLNTransformerEncoder(nn.Module):
+    def __init__(self, layer, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList([layer] + [
+            AdaLNTransformerEncoderLayer(
+                layer.self_attn.embed_dim,
+                layer.self_attn.num_heads,
+                layer.adaLN_modulation[-1].in_features,
+                layer.linear1.out_features,
+                layer.dropout.p,
+            )
+            for _ in range(num_layers - 1)
+        ])
+
+    def forward(self, src, cond, mask=None, is_causal=False):
+        output = src
+        for layer in self.layers:
+            output = layer(output, cond, src_mask=mask, is_causal=is_causal)
+        return output
+
+
+class SkillVAEFTAdaLN(SkillVAE):
+    def __init__(self,
+                 *args,
+                 ft_dim=6,
+                 ft_downsample_mode='avg',
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_ft_conditioning = True
+        self.ft_dim = ft_dim
+        self.ft_downsample_mode = ft_downsample_mode
+
+        if ft_downsample_mode == 'conv':
+            self.ft_proj = nn.Linear(ft_dim, self.encoder_dim)
+            self.ft_conv_block = ResidualTemporalBlock(
+                self.encoder_dim,
+                self.encoder_dim,
+                kernel_size=self._conv_kernel_sizes(),
+                stride=self._conv_strides(),
+                causal=self.use_causal_encoder,
+            )
+            cond_dim = self.encoder_dim
+        elif ft_downsample_mode == 'avg':
+            cond_dim = ft_dim
+        elif ft_downsample_mode == 'max':
+            cond_dim = ft_dim
+        elif ft_downsample_mode == 'avg_max':
+            cond_dim = 2 * ft_dim
+        else:
+            raise ValueError(f"Unsupported ft_downsample_mode: {ft_downsample_mode}")
+
+        layer = AdaLNTransformerEncoderLayer(
+            d_model=self.encoder_dim,
+            nhead=self.encoder.layers[0].self_attn.num_heads,
+            cond_dim=cond_dim,
+            dim_feedforward=4 * self.encoder_dim,
+            dropout=self.encoder.layers[0].dropout.p,
+            activation='gelu',
+        )
+        self.encoder = AdaLNTransformerEncoder(layer, len(self.encoder.layers))
+
+    def _conv_strides(self):
+        strides = [2] * int(np.log2(self.downsample_factor)) + [1]
+        if len(strides) == 1:
+            strides = [1, 1]
+        return strides
+
+    def _conv_kernel_sizes(self):
+        kernel_sizes = [5] + [3] * int(np.log2(self.downsample_factor))
+        if len(self._conv_strides()) == 2 and self.downsample_factor == 1:
+            kernel_sizes = [3, 2]
+        return kernel_sizes
+
+    def _pool_ft(self, ft, target_len):
+        if ft.dim() == 4:
+            B, T, samples_per_step, C = ft.shape
+            ft = ft.reshape(B, T * samples_per_step, C)
+            T = T * samples_per_step
+            pool_width = self.downsample_factor * samples_per_step
+        elif ft.dim() == 3:
+            B, T, C = ft.shape
+            pool_width = self.downsample_factor
+        else:
+            raise ValueError(f"Expected ft to have shape (B,T,C) or (B,T,S,C), got {tuple(ft.shape)}")
+
+        target_T = target_len * pool_width
+        if T < target_T:
+            pad = ft[:, -1:].expand(B, target_T - T, C)
+            ft = torch.cat([ft, pad], dim=1)
+        elif T > target_T:
+            ft = ft[:, :target_T]
+
+        ft = ft.reshape(B, target_len, pool_width, C)
+        if self.ft_downsample_mode == 'avg':
+            return ft.mean(dim=2)
+        if self.ft_downsample_mode == 'max':
+            max_idx = ft.abs().argmax(dim=2, keepdim=True)
+            return ft.gather(dim=2, index=max_idx).squeeze(2)
+        if self.ft_downsample_mode == 'avg_max':
+            avg = ft.mean(dim=2)
+            max_idx = ft.abs().argmax(dim=2, keepdim=True)
+            max_abs = ft.gather(dim=2, index=max_idx).squeeze(2)
+            return torch.cat([avg, max_abs], dim=-1)
+        raise ValueError(f"Pooling is not defined for mode {self.ft_downsample_mode}")
+
+    def _get_ft_cond(self, ft, target_len):
+        if ft is None:
+            if self.ft_downsample_mode == 'conv':
+                cond_dim = self.encoder_dim
+            elif self.ft_downsample_mode == 'avg_max':
+                cond_dim = 2 * self.ft_dim
+            else:
+                cond_dim = self.ft_dim
+            return torch.zeros((1, target_len, cond_dim), device=self.device)
+
+        if self.ft_downsample_mode == 'conv':
+            if ft.dim() == 4:
+                B, T, samples_per_step, C = ft.shape
+                ft = ft.reshape(B, T * samples_per_step, C)
+            cond = self.ft_proj(ft)
+            cond = self.ft_conv_block(cond)
+            if cond.size(1) != target_len:
+                cond = F.interpolate(
+                    cond.transpose(1, 2),
+                    size=target_len,
+                    mode='linear',
+                    align_corners=False,
+                ).transpose(1, 2)
+            return cond
+
+        return self._pool_ft(ft, target_len)
+
+    def encode(self, act, obs_emb=None, ft=None):
+        x = self.action_proj(act)
+        x = self.conv_block(x)
+        B, H, D = x.shape
+
+        ft_cond = self._get_ft_cond(ft, H)
+        if ft_cond.size(0) == 1 and B != 1:
+            ft_cond = ft_cond.expand(B, -1, -1)
+
+        if obs_emb is not None:
+            obs_cond = torch.zeros(
+                (B, obs_emb.size(1), ft_cond.size(-1)),
+                dtype=ft_cond.dtype,
+                device=ft_cond.device,
+            )
+            ft_cond = torch.cat([obs_cond, ft_cond], dim=1)
+            x = torch.cat([obs_emb, x], dim=1)
+        x = self.add_positional_emb(x)
+
+        if self.use_causal_encoder:
+            mask = nn.Transformer.generate_square_subsequent_mask(x.size(1), device=x.device)
+            x = self.encoder(x, ft_cond, mask=mask, is_causal=True)
+        else:
+            x = self.encoder(x, ft_cond)
+
+        x = x[:, -H:]
+        return x
+
+    def forward(self, act, obs_emb=None, ft=None):
+        z = self.encode(act, obs_emb=obs_emb, ft=ft)
+        codes, _, pp, pp_sample, commitment_loss = self.quantize(z)
+        x = self.decode(codes, obs_emb=obs_emb)
+        return x, pp, pp_sample, commitment_loss, codes
+
+    def get_indices(self, act, obs_emb=None, ft=None):
+        z = self.encode(act, obs_emb=obs_emb, ft=ft)
+        _, indices, _, _, _ = self.quantize(z)
+        return indices
 
 
 class CausalConv1d(nn.Module):

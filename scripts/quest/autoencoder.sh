@@ -2,9 +2,9 @@
 # This script is used to train stage 0 i.e. the autoencoder of Quest
 
 python train.py --config-name=train_autoencoder.yaml \
-    task=libero_90 \
+    task=real_robot_reassemble \
     algo=quest \
-    exp_name=final \
+    exp_name=reassemble \
     variant_name=block_32_ds_4 \
     training.use_tqdm=false \
     training.save_all_checkpoints=true \
@@ -14,4 +14,10 @@ python train.py --config-name=train_autoencoder.yaml \
     make_unique_experiment_dir=false \
     algo.skill_block_size=32 \
     algo.downsample_factor=4 \
-    seed=0
+    seed=0 \
+    data_prefix=/home/seunghyo/real_robot/REASSEMBLE/data/df_rlds/REASSEMBLE \
+    device=cuda:3
+
+    
+    # task=real_robot \
+    # data_prefix=/home/seunghyo/real_robot/demos \

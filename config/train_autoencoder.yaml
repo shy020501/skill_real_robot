@@ -3,10 +3,10 @@ defaults:
   - _self_
 
 train_dataloader:
-  batch_size: 256
+  batch_size: 1024
 
 training:
-  n_epochs: 100 # 100 recommended for libero, 200 for metaworld
+  n_epochs: 200 # 100 recommended for libero, 200 for metaworld
   use_amp: false # this seems to cause instabilities for shorter chunks (<64) but causes speedups for larger ones
   load_obs: ${algo.dataset.load_obs_for_pretrain}
 

@@ -1,0 +1,92 @@
+defaults:
+  - base
+  - _self_
+
+policy:
+  _target_: quest.algos.quest.QueST
+  autoencoder:
+    _target_: quest.algos.quest_modules.skill_vae.SkillVAEFTAdaLN
+    action_dim: ${task.shape_meta.action_dim}
+    encoder_dim: 256
+    decoder_dim: 256
+    skill_block_size: ${algo.skill_block_size}
+    downsample_factor: ${algo.downsample_factor}
+    attn_pdrop: 0.1
+    use_causal_encoder: true
+    use_causal_decoder: true
+    encoder_heads: 4
+    encoder_layers: 2
+    decoder_heads: 4
+    decoder_layers: 4
+    vq_type: "fsq"
+    fsq_level: null
+    codebook_dim: 512
+    codebook_size: ${algo.codebook_size}
+    ft_dim: 6
+    ft_downsample_mode: ${algo.ft_downsample_mode}
+  policy_prior:
+    _target_: quest.algos.quest_modules.skill_gpt.SkillGPT
+    action_dim: ${task.shape_meta.action_dim}
+    start_token: 1000
+    vocab_size: 1000
+    block_size: ${eval:'${algo.skill_block_size} // ${algo.downsample_factor}'}
+    n_layer: 6
+    n_head: 6
+    n_embd: ${algo.embed_dim}
+    attn_pdrop: 0.1
+    embd_pdrop: 0.1
+    beam_size: 5
+    temperature: 1.0
+    device: ${device}
+  stage: ${stage}
+  loss_fn:
+    _target_: torch.nn.L1Loss
+  l1_loss_scale: ${algo.l1_loss_scale}
+  action_horizon: ${algo.action_horizon}
+  obs_reduction: cat
+  device: ${device}
+
+name: quest_ft_adaln
+
+lr: 0.0001
+weight_decay: 0.0001
+l1_loss_scale: 0
+
+embed_dim: 384
+lowdim_embed_dim: 128
+image_embed_dim: 256
+
+codebook_size: 1024
+skill_block_size: 32
+downsample_factor: 4
+ft_downsample_mode: avg
+
+action_horizon: 8
+frame_stack: 1
+
+dataset:
+  seq_len: ${algo.skill_block_size}
+  frame_stack: ${algo.frame_stack}
+  obs_seq_len: 1
+  lowdim_obs_seq_len: null
+  load_obs_for_pretrain: false
+  load_next_obs: false
+  use_ft: true
+  ft_shift: 1
+  ft_config:
+    ft_source: state
+    stats_path: null
+    median_kernel: 5
+    ema_alpha: 0.3
+    history_filter: butterworth
+    history_sample_rate_hz: 100.0
+    history_cutoff_hz: 10.0
+    history_filter_order: 2
+    history_reduce: none
+    local_window: 7
+    lambda_delta: 1.0
+    t_high: 3.5
+    t_low: 1.5
+    min_seed_len: 2
+    min_active_len: 3
+    max_gap_len: 3

@@ -26,6 +26,16 @@ class QueST(ChunkPolicy):
         self.codebook_size = np.array(autoencoder.fsq_level).prod()
         
         self.loss = loss_fn
+
+    def _autoencoder_forward(self, data):
+        if getattr(self.autoencoder, "use_ft_conditioning", False):
+            return self.autoencoder(data["actions"], ft=data.get("masked_ft"))
+        return self.autoencoder(data["actions"])
+
+    def _autoencoder_get_indices(self, data):
+        if getattr(self.autoencoder, "use_ft_conditioning", False):
+            return self.autoencoder.get_indices(data["actions"], ft=data.get("masked_ft"))
+        return self.autoencoder.get_indices(data["actions"])
         
     def get_optimizers(self):
         if self.stage == 0:
@@ -68,12 +78,26 @@ class QueST(ChunkPolicy):
             return self.compute_prior_loss(data)
 
     def compute_autoencoder_loss(self, data):
-        pred, pp, pp_sample, aux_loss, _ = self.autoencoder(data["actions"])
+        pred, pp, pp_sample, aux_loss, _ = self._autoencoder_forward(data)
         recon_loss = self.loss(pred, data["actions"])
         if self.autoencoder.vq_type == 'vq':
             loss = recon_loss + aux_loss
         else:
             loss = recon_loss
+
+        with torch.no_grad():
+            target_gripper = data["actions"][..., -1]
+            pred_gripper = pred[..., -1]
+            target_gripper_active = target_gripper.abs() > 0.5
+            pred_gripper_active = pred_gripper.abs() > 0.5
+            gripper_active_count = target_gripper_active.sum()
+            if gripper_active_count > 0:
+                gripper_recall = (
+                    (pred_gripper_active & target_gripper_active).sum().float()
+                    / gripper_active_count.float()
+                )
+            else:
+                gripper_recall = torch.tensor(0.0, device=pred.device)
             
         info = {
             'loss': loss.item(),
@@ -81,13 +105,15 @@ class QueST(ChunkPolicy):
             'aux_loss': aux_loss.sum().item(),
             'pp': pp.item(),
             'pp_sample': pp_sample.item(),
+            'gripper_recall_when_abs_gt_0_5': gripper_recall.item(),
+            'gripper_abs_gt_0_5_count': gripper_active_count.item(),
         }
         return loss, info
 
     def compute_prior_loss(self, data):
         data = self.preprocess_input(data, train_mode=True)
         with torch.no_grad():
-            indices = self.autoencoder.get_indices(data["actions"]).long()
+            indices = self._autoencoder_get_indices(data).long()
         context = self.get_context(data)
         start_tokens = (torch.ones((context.shape[0], 1), device=self.device, dtype=torch.long) * self.start_token)
         x = torch.cat([start_tokens, indices[:,:-1]], dim=1)
