@@ -110,11 +110,20 @@ def get_task_embs(task_embedding_format, descriptions):
 # -------------------------------------------------
 # pkl -> episodes
 # -------------------------------------------------
-def load_task_episodes_from_pkls(task_dir: str) -> List[Dict]:
+def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[Dict]:
     pkl_files = sorted(glob.glob(os.path.join(task_dir, "**/*.pkl"), recursive=True))
     print(f"[{os.path.basename(task_dir)}] Found pkl files: {len(pkl_files)}")
 
     episodes = []
+
+    def keep_numeric_observation(obs):
+        if not isinstance(obs, dict):
+            return obs
+        return {
+            key: obs[key]
+            for key in ("state", "right_force_history", "force_history")
+            if key in obs
+        }
 
     def trim_zero_action_episode(ep: Dict, trailing_keep: int = 5) -> Optional[Dict]:
         """
@@ -164,7 +173,10 @@ def load_task_episodes_from_pkls(task_dir: str) -> List[Dict]:
 
         for step in data:
             for k in keys:
-                cur[k].append(step.get(k))
+                value = step.get(k)
+                if not load_obs and k == "observations":
+                    value = keep_numeric_observation(value)
+                cur[k].append(value)
             done = step.get("dones", False)
 
             if done:
@@ -180,6 +192,8 @@ def load_task_episodes_from_pkls(task_dir: str) -> List[Dict]:
             ep = trim_zero_action_episode(ep, trailing_keep=5)
             if ep is not None and len(ep["actions"]) > 0:
                 episodes.append(ep)
+
+        del data, step, value
 
     print(f"[{os.path.basename(task_dir)}] Total episodes: {len(episodes)}")
     return episodes
@@ -758,7 +772,7 @@ def build_realworld_dataset(
     descriptions = []
     for task_name in task_names:
         task_dir = os.path.join(data_prefix, task_name)
-        episodes = load_task_episodes_from_pkls(task_dir)
+        episodes = load_task_episodes_from_pkls(task_dir, load_obs=load_obs)
 
         if len(episodes) == 0:
             print(f"[WARNING] Skip empty task: {task_name}")
