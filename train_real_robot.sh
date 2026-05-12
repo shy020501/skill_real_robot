@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 || $# -gt 5 ]]; then
-    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked]"
-    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [10hz|100hz] [masked|unmasked]"
+if [[ $# -lt 2 || $# -gt 6 ]]; then
+    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked] [state|force_history|state_force_history|all]"
+    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [10hz|100hz] [masked|unmasked] [state|force_history|state_force_history|all]"
     exit 1
 fi
 
@@ -12,6 +12,7 @@ device="$2"
 data_prefix="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos"
 ft_rate="10hz"
 mask_mode="unmasked"
+prior_key="all"
 shift 2
 
 while [[ $# -gt 0 ]]; do
@@ -21,6 +22,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         masked|unmasked)
             mask_mode="$1"
+            ;;
+        state|force_history|state_force_history|all)
+            prior_key="$1"
             ;;
         *)
             data_prefix="$1"
@@ -60,6 +64,15 @@ case "${mask_mode}" in
         ;;
     *)
         echo "Unknown mask mode '${mask_mode}'. Expected one of: masked, unmasked"
+        exit 1
+        ;;
+esac
+
+case "${prior_key}" in
+    state|force_history|state_force_history|all)
+        ;;
+    *)
+        echo "Unknown prior '${prior_key}'. Expected one of: state, force_history, state_force_history, all"
         exit 1
         ;;
 esac
@@ -115,7 +128,15 @@ python train.py --config-name=train_autoencoder.yaml \
     "${common_args[@]}" \
     "${extra_args[@]}"
 
-for task_key in state force_history state_force_history; do
+if [[ "${prior_key}" == "all" ]]; then
+    prior_tasks=(state force_history state_force_history)
+else
+    prior_tasks=("${prior_key}")
+fi
+
+echo "[stage1] tasks=${prior_tasks[*]}"
+
+for task_key in "${prior_tasks[@]}"; do
     case "${task_key}" in
         state)
             task_config="real_robot_state"
