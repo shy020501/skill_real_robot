@@ -257,8 +257,10 @@ class SkillVAEFTAdaLN(SkillVAE):
         self.ft_dim = ft_dim
         self.ft_downsample_mode = ft_downsample_mode
 
+        # common projection: (B, H, 6) -> (B, H, D)
+        self.ft_proj = nn.Linear(ft_dim, self.encoder_dim)
+
         if ft_downsample_mode == 'conv':
-            self.ft_proj = nn.Linear(ft_dim, self.encoder_dim)
             self.ft_conv_block = ResidualTemporalBlock(
                 self.encoder_dim,
                 self.encoder_dim,
@@ -267,12 +269,15 @@ class SkillVAEFTAdaLN(SkillVAE):
                 causal=self.use_causal_encoder,
             )
             cond_dim = self.encoder_dim
-        elif ft_downsample_mode == 'avg':
-            cond_dim = ft_dim
-        elif ft_downsample_mode == 'max':
-            cond_dim = ft_dim
+
+        elif ft_downsample_mode in ['avg', 'max']:
+            cond_dim = self.encoder_dim
+
         elif ft_downsample_mode == 'avg_max':
-            cond_dim = 2 * ft_dim
+            # avg + max gives 2D, project back to D
+            self.ft_avg_max_proj = nn.Linear(2 * self.encoder_dim, self.encoder_dim)
+            cond_dim = self.encoder_dim
+
         else:
             raise ValueError(f"Unsupported ft_downsample_mode: {ft_downsample_mode}")
 
@@ -327,25 +332,21 @@ class SkillVAEFTAdaLN(SkillVAE):
             avg = ft.mean(dim=2)
             max_idx = ft.abs().argmax(dim=2, keepdim=True)
             max_abs = ft.gather(dim=2, index=max_idx).squeeze(2)
-            return torch.cat([avg, max_abs], dim=-1)
+            return self.ft_avg_max_proj(torch.cat([avg, max_abs], dim=-1))
         raise ValueError(f"Pooling is not defined for mode {self.ft_downsample_mode}")
 
     def _get_ft_cond(self, ft, target_len):
         if ft is None:
-            if self.ft_downsample_mode == 'conv':
-                cond_dim = self.encoder_dim
-            elif self.ft_downsample_mode == 'avg_max':
-                cond_dim = 2 * self.ft_dim
-            else:
-                cond_dim = self.ft_dim
-            return torch.zeros((1, target_len, cond_dim), device=self.device)
+            return torch.zeros((1, target_len, self.encoder_dim), device=self.device)
+            
+        if ft.dim() == 4:
+            B, T, samples_per_step, C = ft.shape
+            ft = ft.reshape(B, T * samples_per_step, C)
+
+        ft = self.ft_proj(ft)
 
         if self.ft_downsample_mode == 'conv':
-            if ft.dim() == 4:
-                B, T, samples_per_step, C = ft.shape
-                ft = ft.reshape(B, T * samples_per_step, C)
-            cond = self.ft_proj(ft)
-            cond = self.ft_conv_block(cond)
+            cond = self.ft_conv_block(ft)
             if cond.size(1) != target_len:
                 cond = F.interpolate(
                     cond.transpose(1, 2),
