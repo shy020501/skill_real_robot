@@ -2,8 +2,8 @@
 set -euo pipefail
 
 if [[ $# -lt 3 || $# -gt 6 ]]; then
-    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [data_prefix] [state|force_history] [masked|unmasked]"
-    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [state|force_history] [masked|unmasked]"
+    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [data_prefix] [10hz|100hz] [masked|unmasked]"
+    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [10hz|100hz] [masked|unmasked]"
     exit 1
 fi
 
@@ -11,14 +11,14 @@ variant_key="$1"
 device="$2"
 prior_key="$3"
 data_prefix="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos"
-ft_source="state"
-mask_mode="masked"
+ft_rate="10hz"
+mask_mode="unmasked"
 shift 3
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        state|force_history)
-            ft_source="$1"
+        10hz|100hz)
+            ft_rate="$1"
             ;;
         masked|unmasked)
             mask_mode="$1"
@@ -44,15 +44,17 @@ case "${prior_key}" in
         ;;
 esac
 
-case "${ft_source}" in
-    state)
-        ft_label="10hz"
+case "${ft_rate}" in
+    10hz)
+        ft_source="state"
+        ft_label="${ft_rate}"
         ;;
-    force_history)
-        ft_label="100hz"
+    100hz)
+        ft_source="force_history"
+        ft_label="${ft_rate}"
         ;;
     *)
-        echo "Unknown ft_source '${ft_source}'. Expected one of: state, force_history"
+        echo "Unknown FT rate '${ft_rate}'. Expected one of: 10hz, 100hz"
         exit 1
         ;;
 esac
@@ -63,7 +65,7 @@ case "${mask_mode}" in
         use_threshold_mask=true
         ;;
     unmasked)
-        variant_prefix=""
+        variant_prefix="unmasked_"
         use_threshold_mask=false
         ;;
     *)
