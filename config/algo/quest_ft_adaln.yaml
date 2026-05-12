@@ -76,7 +76,7 @@ dataset:
   ft_config:
     ft_source: state
     stats_path: null
-    median_kernel: 5
+    use_threshold_mask: false
     ema_alpha: 0.3
     history_filter: butterworth
     history_sample_rate_hz: 100.0

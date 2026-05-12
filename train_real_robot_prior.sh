@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 3 || $# -gt 5 ]]; then
-    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [data_prefix] [state|force_history]"
-    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [state|force_history]"
+if [[ $# -lt 3 || $# -gt 6 ]]; then
+    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [data_prefix] [state|force_history] [masked|unmasked]"
+    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [state|force_history] [masked|unmasked]"
     exit 1
 fi
 
@@ -12,21 +12,23 @@ device="$2"
 prior_key="$3"
 data_prefix="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos"
 ft_source="state"
+mask_mode="masked"
+shift 3
 
-if [[ $# -ge 4 ]]; then
-    case "$4" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         state|force_history)
-            ft_source="$4"
+            ft_source="$1"
+            ;;
+        masked|unmasked)
+            mask_mode="$1"
             ;;
         *)
-            data_prefix="$4"
+            data_prefix="$1"
             ;;
     esac
-fi
-
-if [[ $# -eq 5 ]]; then
-    ft_source="$5"
-fi
+    shift
+done
 
 if [[ ! -d "${data_prefix}" ]]; then
     echo "Data prefix does not exist: ${data_prefix}"
@@ -55,20 +57,36 @@ case "${ft_source}" in
         ;;
 esac
 
+case "${mask_mode}" in
+    masked)
+        variant_prefix="masked_"
+        use_threshold_mask=true
+        ;;
+    unmasked)
+        variant_prefix=""
+        use_threshold_mask=false
+        ;;
+    *)
+        echo "Unknown mask mode '${mask_mode}'. Expected one of: masked, unmasked"
+        exit 1
+        ;;
+esac
+
 extra_args=()
 run_key="${variant_key}"
 case "${variant_key}" in
     quest)
         algo="quest"
         algo_name="quest"
-        variant="masked_block_32_ds_4_quest"
+        variant="${variant_prefix}block_32_ds_4_quest"
         ;;
     max|avg|avg_max|conv)
         algo="quest_ft_adaln"
         algo_name="quest_ft_adaln"
-        variant="masked_block_32_ds_4_ft_${variant_key}"
+        variant="${variant_prefix}block_32_ds_4_ft_${variant_key}"
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
+        extra_args+=("algo.dataset.ft_config.use_threshold_mask=${use_threshold_mask}")
         run_key="${variant_key}_${ft_label}"
         ;;
     *)
@@ -108,6 +126,7 @@ else
 fi
 
 echo "[prior-only] variant=${variant}"
+echo "[prior-only] mask_mode=${mask_mode}"
 echo "[prior-only] checkpoint=${autoencoder_checkpoint_dir}"
 echo "[prior-only] tasks=${prior_tasks[*]}"
 

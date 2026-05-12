@@ -1,4 +1,5 @@
 import os
+import random
 import time
 import hydra
 import wandb
@@ -8,6 +9,7 @@ from tqdm import tqdm
 from pathlib import Path
 import warnings
 
+import numpy as np
 import torch
 import torch.nn as nn
 import quest.utils.utils as utils
@@ -18,11 +20,32 @@ import gc
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
+def seed_everything(seed):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
 @hydra.main(config_path="config", version_base=None)
 def main(cfg):
     device = cfg.device
     seed = cfg.seed
-    torch.manual_seed(seed)
+    seed_everything(seed)
     train_cfg = cfg.training
 
     # create model
@@ -75,9 +98,13 @@ def main(cfg):
 
     dataset = instantiate(cfg.task.dataset)
     model.preprocess_dataset(dataset, use_tqdm=train_cfg.use_tqdm)
+    dataloader_generator = torch.Generator()
+    dataloader_generator.manual_seed(seed)
     train_dataloader = instantiate(
         cfg.train_dataloader, 
-        dataset=dataset)
+        dataset=dataset,
+        worker_init_fn=seed_worker,
+        generator=dataloader_generator)
 
     print('Saving to:', experiment_dir)
     print('Experiment name:', experiment_name)

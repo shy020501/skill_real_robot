@@ -18,6 +18,7 @@ from quest.utils.force_torque_utils import (
     butterworth_lowpass_sequence,
     build_episode_masked_ft,
     compute_ft_stats_for_episodes,
+    compute_mask_sequence,
     load_global_ft_stats_from_json,
     reduce_force_history,
     smooth_ft_sequence,
@@ -679,14 +680,21 @@ class RealWorldParquetSequenceDataset(Dataset):
             if self.ft_config["ft_source"] == "state":
                 ft = smooth_ft_sequence(
                     ft,
-                    median_kernel=self.ft_config["median_kernel"],
                     ema_alpha=self.ft_config["ema_alpha"],
                 )
+                if self.ft_config["use_threshold_mask"]:
+                    _, ft_mask = compute_mask_sequence(ft, config=self.ft_config)
+                    ft = ft * ft_mask.astype(np.float32)
+                else:
+                    ft_mask = np.ones_like(ft, dtype=np.float32)
+            else:
+                ft_mask = np.ones_like(ft, dtype=np.float32)
             ft_len = len(ft)
             ft_start_t = min(start_t + self.ft_shift, ft_len - 1)
             ft_seq = self._slice_with_padding(list(ft), ft_start_t, self.seq_length)
+            ft_mask_seq = self._slice_with_padding(list(ft_mask), ft_start_t, self.seq_length)
             ret["masked_ft"] = np.stack(ft_seq, axis=0).astype(np.float32)
-            ret["ft_mask"] = np.ones_like(ret["masked_ft"], dtype=np.float32)
+            ret["ft_mask"] = np.stack(ft_mask_seq, axis=0).astype(np.float32)
 
         if not self.load_obs:
             return ret

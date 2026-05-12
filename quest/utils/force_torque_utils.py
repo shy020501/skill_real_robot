@@ -15,7 +15,7 @@ EPS = 1e-8
 DEFAULT_FT_CONFIG = {
     "ft_source": "state",
     "stats_path": None,
-    "median_kernel": 5,
+    "use_threshold_mask": False,
     "ema_alpha": 0.3,
     "history_filter": "butterworth",
     "history_sample_rate_hz": 100.0,
@@ -110,16 +110,6 @@ def compute_ft_stats_for_episodes(episodes, state_key=STATE_KEY, config=None):
     return {"mean": mean, "std": std}
 
 
-def median_filter_1d(x, kernel_size=5):
-    assert kernel_size % 2 == 1, "kernel_size must be odd"
-    pad = kernel_size // 2
-    x_pad = np.pad(x, (pad, pad), mode="edge")
-    out = np.zeros_like(x)
-    for t in range(len(x)):
-        out[t] = np.median(x_pad[t:t + kernel_size])
-    return out
-
-
 def ema_filter_1d(x, alpha=0.3):
     out = np.zeros_like(x)
     out[0] = x[0]
@@ -128,13 +118,10 @@ def ema_filter_1d(x, alpha=0.3):
     return out
 
 
-def smooth_ft_sequence(data, median_kernel=5, ema_alpha=0.3):
+def smooth_ft_sequence(data, ema_alpha=0.3):
     smoothed = data.copy()
     for axis in range(data.shape[1]):
         x = data[:, axis]
-        # To re-enable median filtering, uncomment this block.
-        if median_kernel is not None and median_kernel > 1:
-            x = median_filter_1d(x, kernel_size=median_kernel)
         if ema_alpha is not None:
             x = ema_filter_1d(x, alpha=ema_alpha)
         smoothed[:, axis] = x
@@ -337,12 +324,12 @@ def build_episode_masked_ft(episode, stats, config=None, state_key=STATE_KEY):
     normalized = (ft - mean) / std
     smoothed = smooth_ft_sequence(
         normalized,
-        median_kernel=config["median_kernel"],
         ema_alpha=config["ema_alpha"],
     )
-    # To re-enable score/threshold masking and zero-masking, uncomment these two lines and remove the all-ones mask assignment below.
-    _, mask = compute_mask_sequence(smoothed, config=config)
-    masked_ft = smoothed * mask.astype(np.float32)
-    # mask = np.ones_like(smoothed, dtype=bool)
-    # masked_ft = smoothed
+    if config["use_threshold_mask"]:
+        _, mask = compute_mask_sequence(smoothed, config=config)
+        masked_ft = smoothed * mask.astype(np.float32)
+    else:
+        mask = np.ones_like(smoothed, dtype=bool)
+        masked_ft = smoothed
     return masked_ft.astype(np.float32), mask.astype(np.float32), smoothed.astype(np.float32)
