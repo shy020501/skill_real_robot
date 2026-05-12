@@ -257,7 +257,7 @@ class SkillVAEFTAdaLN(SkillVAE):
         self.ft_dim = ft_dim
         self.ft_downsample_mode = ft_downsample_mode
 
-        # common projection: (B, H, 6) -> (B, H, D)
+        # common projection: (B, H, 6) or (B, H, S, 6) -> (..., D)
         self.ft_proj = nn.Linear(ft_dim, self.encoder_dim)
 
         if ft_downsample_mode == 'conv':
@@ -338,22 +338,29 @@ class SkillVAEFTAdaLN(SkillVAE):
     def _get_ft_cond(self, ft, target_len):
         if ft is None:
             return torch.zeros((1, target_len, self.encoder_dim), device=self.device)
-            
-        if ft.dim() == 4:
-            B, T, samples_per_step, C = ft.shape
-            ft = ft.reshape(B, T * samples_per_step, C)
 
         ft = self.ft_proj(ft)
 
+        if ft.dim() == 4:
+            B, T, samples_per_step, C = ft.shape
+
         if self.ft_downsample_mode == 'conv':
+            if ft.dim() == 4:
+                B, T, samples_per_step, C = ft.shape
+                ft = ft.reshape(B, T * samples_per_step, C)
             cond = self.ft_conv_block(ft)
             if cond.size(1) != target_len:
-                cond = F.interpolate(
-                    cond.transpose(1, 2),
-                    size=target_len,
-                    mode='linear',
-                    align_corners=False,
-                ).transpose(1, 2)
+                cond = cond.transpose(1, 2)
+                if cond.size(-1) > target_len:
+                    cond = F.adaptive_avg_pool1d(cond, target_len)
+                else:
+                    cond = F.interpolate(
+                        cond,
+                        size=target_len,
+                        mode='linear',
+                        align_corners=False,
+                    )
+                cond = cond.transpose(1, 2)
             return cond
 
         return self._pool_ft(ft, target_len)
