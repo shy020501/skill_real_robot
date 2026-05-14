@@ -2,11 +2,11 @@ import json
 import os
 
 import numpy as np
-from scipy.signal import butter, sosfiltfilt
+from scipy.signal import butter, sosfilt, sosfilt_zi, sosfiltfilt
 
 
 STATE_KEY = "state"
-FORCE_HISTORY_KEYS = ("right_force_history", "force_history")
+FORCE_HISTORY_KEYS = ("left_force_history", "right_force_history")
 RIGHT_FORCE_SLICE = slice(20, 23)
 RIGHT_TORQUE_SLICE = slice(29, 32)
 EPS = 1e-8
@@ -78,28 +78,29 @@ def extract_ft_sequence(episode, state_key=STATE_KEY):
     return np.stack(ft, axis=0).astype(np.float32)
 
 
-def get_force_history_value(obs_t):
-    for key in FORCE_HISTORY_KEYS:
-        if key in obs_t:
-            return obs_t[key]
-    raise KeyError(
-        f"None of force history keys {FORCE_HISTORY_KEYS} found. "
-        f"Available keys: {list(obs_t.keys())}"
-    )
+def get_force_history_value(obs_t, key="right_force_history"):
+    if key not in FORCE_HISTORY_KEYS:
+        raise KeyError(f"Unsupported force history key '{key}'. Expected one of {FORCE_HISTORY_KEYS}.")
+    if key not in obs_t:
+        raise KeyError(f"Observation is missing '{key}'. Available keys: {list(obs_t.keys())}")
+    return obs_t[key]
 
 
-def extract_force_history_sequence(episode):
+def extract_force_history_sequence(episode, force_history_key="right_force_history"):
     histories = []
     for obs in episode["observations"]:
-        history = np.asarray(get_force_history_value(obs), dtype=np.float32).squeeze()
+        history = np.asarray(get_force_history_value(obs, force_history_key), dtype=np.float32).squeeze()
         histories.append(history.reshape(-1, 6))
     return np.stack(histories, axis=0).astype(np.float32)
 
 
 def compute_ft_stats_for_episodes(episodes, state_key=STATE_KEY, config=None):
     config = {**DEFAULT_FT_CONFIG, **(config or {})}
-    if config["ft_source"] == "force_history":
-        all_ft = [extract_force_history_sequence(ep).reshape(-1, 6) for ep in episodes]
+    if config["ft_source"] in FORCE_HISTORY_KEYS:
+        all_ft = [
+            extract_force_history_sequence(ep, force_history_key=config["ft_source"]).reshape(-1, 6)
+            for ep in episodes
+        ]
     elif config["ft_source"] == "state":
         all_ft = [extract_ft_sequence(ep, state_key=state_key) for ep in episodes]
     else:
@@ -148,6 +149,27 @@ def butterworth_lowpass_sequence(
     return sosfiltfilt(sos, data, axis=0, padlen=padlen).astype(np.float32)
 
 
+def causal_butterworth_lowpass_sequence(
+    data,
+    sample_rate_hz=100.0,
+    cutoff_hz=10.0,
+    order=2,
+):
+    data = np.asarray(data, dtype=np.float32)
+    if data.shape[0] < 2:
+        return data.copy()
+    nyquist = 0.5 * sample_rate_hz
+    if not 0.0 < cutoff_hz < nyquist:
+        raise ValueError(
+            f"cutoff_hz must be in (0, Nyquist). Got cutoff_hz={cutoff_hz}, "
+            f"sample_rate_hz={sample_rate_hz}."
+        )
+    sos = butter(order, cutoff_hz / nyquist, btype="low", output="sos")
+    zi = sosfilt_zi(sos)[:, :, None] * data[0][None, None, :]
+    filtered, _ = sosfilt(sos, data, axis=0, zi=zi)
+    return filtered.astype(np.float32)
+
+
 def reduce_force_history(history, mode="last"):
     if mode == "last":
         return history[-1]
@@ -165,32 +187,38 @@ def build_force_history_ft_sequence(episode, stats, config=None):
     mean = np.asarray(stats["mean"], dtype=np.float32)
     std = np.maximum(np.asarray(stats["std"], dtype=np.float32), EPS)
     normalized = (histories - mean) / std
+    flat_normalized = normalized.reshape(-1, normalized.shape[-1])
 
     if config["history_filter"] == "butterworth":
-        smoothed = np.stack([
-            butterworth_lowpass_sequence(
-                history,
-                sample_rate_hz=config["history_sample_rate_hz"],
-                cutoff_hz=config["history_cutoff_hz"],
-                order=config["history_filter_order"],
-            )
-            for history in normalized
-        ], axis=0)
+        flat_smoothed = butterworth_lowpass_sequence(
+            flat_normalized,
+            sample_rate_hz=config["history_sample_rate_hz"],
+            cutoff_hz=config["history_cutoff_hz"],
+            order=config["history_filter_order"],
+        )
     elif config["history_filter"] in (None, "none"):
-        smoothed = normalized
+        flat_smoothed = flat_normalized
     else:
         raise ValueError(f"Unsupported history_filter: {config['history_filter']}")
 
-    if config["history_reduce"] in (None, "none"):
+    smoothed = flat_smoothed.reshape(normalized.shape)
+    if config["use_threshold_mask"]:
+        _, flat_mask = compute_mask_sequence(flat_smoothed, config=config)
+        mask = flat_mask.reshape(smoothed.shape)
+        masked = smoothed * mask.astype(np.float32)
+    else:
         mask = np.ones_like(smoothed, dtype=bool)
-        return smoothed.astype(np.float32), mask.astype(np.float32), smoothed.astype(np.float32)
+        masked = smoothed
+
+    if config["history_reduce"] in (None, "none"):
+        return masked.astype(np.float32), mask.astype(np.float32), smoothed.astype(np.float32)
 
     reduced = np.stack([
         reduce_force_history(history, mode=config["history_reduce"])
-        for history in smoothed
+        for history in masked
     ], axis=0)
-    mask = np.ones_like(reduced, dtype=bool)
-    return reduced.astype(np.float32), mask.astype(np.float32), smoothed.astype(np.float32)
+    reduced_mask = np.any(mask, axis=1)
+    return reduced.astype(np.float32), reduced_mask.astype(np.float32), smoothed.astype(np.float32)
 
 
 def local_rms_1d(x, window=7):
@@ -313,7 +341,7 @@ def compute_mask_sequence(data, config=None):
 
 def build_episode_masked_ft(episode, stats, config=None, state_key=STATE_KEY):
     config = {**DEFAULT_FT_CONFIG, **(config or {})}
-    if config["ft_source"] == "force_history":
+    if config["ft_source"] in FORCE_HISTORY_KEYS:
         return build_force_history_ft_sequence(episode, stats, config=config)
     if config["ft_source"] != "state":
         raise ValueError(f"Unsupported ft_source: {config['ft_source']}")

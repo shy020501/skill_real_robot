@@ -1,7 +1,7 @@
 _target_: quest.algos.utils.rgb_modules.ResnetEncoder
 _partial_: true
 output_size: ${algo.image_embed_dim}
-pretrained: false
+pretrained: true
 freeze: false
 remove_layer_num: 4
 no_stride: false

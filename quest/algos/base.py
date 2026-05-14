@@ -35,6 +35,7 @@ class Policy(nn.Module, ABC):
         self.scheduler_factory = scheduler_factory
         self.device = device
         total_obs_channels = 0
+        obs_token_projs = {}
 
         do_image = image_encoder_factory is not None
         do_lowdim = lowdim_encoder_factory is not None
@@ -46,6 +47,10 @@ class Policy(nn.Module, ABC):
                 shape_in = list(shape)
                 encoder = image_encoder_factory(shape_in)
                 total_obs_channels += encoder.out_channels
+                obs_token_projs[self._obs_token_proj_key(name, name)] = self._make_token_proj(
+                    encoder.out_channels,
+                    embed_dim,
+                )
                 if obs_reduction == 'stack' and encoder.out_channels != embed_dim:
                     encoder = nn.Sequential(
                         encoder,
@@ -60,6 +65,12 @@ class Policy(nn.Module, ABC):
             for name, shape in shape_meta['observation']['lowdim'].items():
                 encoder = lowdim_encoder_factory(shape, input_name=name)
                 total_obs_channels += encoder.out_channels
+                token_out_channels = getattr(encoder, "token_out_channels", {name: encoder.out_channels})
+                for token_name, out_channels in token_out_channels.items():
+                    obs_token_projs[self._obs_token_proj_key(name, token_name)] = self._make_token_proj(
+                        out_channels,
+                        embed_dim,
+                    )
                 if obs_reduction == 'stack' and encoder.out_channels != embed_dim:
                     encoder = nn.Sequential(
                         encoder,
@@ -72,6 +83,7 @@ class Policy(nn.Module, ABC):
         if obs_reduction == 'cat':
             self.obs_proj = nn.Linear(total_obs_channels, embed_dim)
         else: self.obs_proj = None
+        self.obs_token_projs = nn.ModuleDict(obs_token_projs)
         
         if self.use_augmentation:
             self.aug = aug_factory(shape_meta=shape_meta)
@@ -85,6 +97,16 @@ class Policy(nn.Module, ABC):
             self.task_encoder = nn.Linear(shape_meta.task.dim, embed_dim)
 
         self.device = device
+
+    @staticmethod
+    def _obs_token_proj_key(modality_name, token_name):
+        return f"{modality_name}__{token_name}".replace(".", "_")
+
+    @staticmethod
+    def _make_token_proj(in_channels, out_channels):
+        if in_channels == out_channels:
+            return nn.Identity()
+        return nn.Linear(in_channels, out_channels)
 
     @abstractmethod
     def compute_loss(self, data):
@@ -146,6 +168,33 @@ class Policy(nn.Module, ABC):
         elif self.obs_reduction == 'none':
             return img_encodings, lowdim_encodings
         return obs_emb
+
+    def obs_encode_tokens(self, data, hwc=False, obs_key='obs'):
+        tokens = []
+
+        for img_name, encoder in self.image_encoders.items():
+            x = data[obs_key][img_name]
+            if hwc:
+                x = einops.rearrange(x, 'B T H W C -> B T C H W')
+            B, T, C, H, W = x.shape
+            e = encoder(x.reshape(B * T, C, H, W))
+            e = e.view(B, T, *e.shape[1:])
+            proj_key = self._obs_token_proj_key(img_name, img_name)
+            tokens.append(self.obs_token_projs[proj_key](e))
+
+        for lowdim_name, encoder in self.lowdim_encoders.items():
+            x = data[obs_key][lowdim_name]
+            if hasattr(encoder, "encode_tokens"):
+                lowdim_tokens = encoder.encode_tokens(x)
+            else:
+                lowdim_tokens = {lowdim_name: encoder(x)}
+            for token_name, token in lowdim_tokens.items():
+                proj_key = self._obs_token_proj_key(lowdim_name, token_name)
+                tokens.append(self.obs_token_projs[proj_key](token))
+
+        if len(tokens) == 0:
+            raise ValueError("No observation tokens were produced.")
+        return torch.cat(tokens, dim=1)
 
     def reset(self):
         return

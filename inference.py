@@ -14,9 +14,9 @@ import websockets.sync.client
 
 POLICY_DIM = 7
 ENV_DIM = 14
-FORCE_HISTORY_KEYS = ("right_force_history", "force_history")
-RIGHT_STATE_KEYS = ("right_state", "state")
-RIGHT_STATE_FORCE_HISTORY_KEY = "right_state_force_history"
+FORCE_HISTORY_KEYS = ("left_force_history", "right_force_history")
+STATE_HISTORY_KEYS = ("left_state_history", "right_state_history")
+RIGHT_STATE_KEYS = ("state",)
 RIGHT_STATE_START_IDX = 19
 RIGHT_STATE_FORCE_TORQUE_IDXS = (1, 2, 3, 10, 11, 12)
 
@@ -102,7 +102,7 @@ def extract_state(obs):
     )
 
 
-def extract_right_state(obs, remove_force=False):
+def extract_right_state(obs, remove_force=True):
     if "right_state" in obs:
         right_state = np.asarray(obs["right_state"], dtype=np.float32).squeeze().reshape(-1)
     else:
@@ -114,21 +114,16 @@ def extract_right_state(obs, remove_force=False):
     return right_state.astype(np.float32)[None, None]
 
 
-def extract_force_history(obs):
-    for key in FORCE_HISTORY_KEYS:
-        if key in obs:
-            force_history = np.asarray(obs[key]).squeeze().astype(np.float32).reshape(-1)
-            return force_history[None, None]
+def extract_history(obs, key):
+    if key in obs:
+        history = np.asarray(obs[key]).squeeze().astype(np.float32)
+        if key in STATE_HISTORY_KEYS:
+            history = np.delete(history, RIGHT_STATE_FORCE_TORQUE_IDXS, axis=-1).astype(np.float32)
+        return history[None, None]
     raise KeyError(
-        f"Observation is missing force history key. Tried {FORCE_HISTORY_KEYS}. "
+        f"Observation is missing history key '{key}'. "
         f"Available keys: {list(obs.keys())}"
     )
-
-
-def extract_right_state_force_history(obs):
-    right_state_no_force = extract_right_state(obs, remove_force=True).reshape(-1)
-    force_history = extract_force_history(obs).reshape(-1)
-    return np.concatenate([right_state_no_force, force_history], axis=0).astype(np.float32)[None, None]
 
 
 def format_obs_for_quest(obs, image_keys, lowdim_keys, prompt, task_id, reset=False):
@@ -142,16 +137,15 @@ def format_obs_for_quest(obs, image_keys, lowdim_keys, prompt, task_id, reset=Fa
         formatted[key] = ensure_bthwc(obs[key])
 
     for key in lowdim_keys:
-        if key in FORCE_HISTORY_KEYS:
-            formatted[key] = extract_force_history(obs)
+        if key in FORCE_HISTORY_KEYS or key in STATE_HISTORY_KEYS:
+            formatted[key] = extract_history(obs, key)
         elif key in RIGHT_STATE_KEYS:
-            formatted[key] = extract_right_state(obs, remove_force=False)
-        elif key == RIGHT_STATE_FORCE_HISTORY_KEY:
-            formatted[key] = extract_right_state_force_history(obs)
+            formatted[key] = extract_right_state(obs, remove_force=True)
         else:
             raise KeyError(
                 f"Unsupported lowdim key for real robot inference: {key}. "
-                "Supported keys are right_state, right_force_history, and right_state_force_history."
+                "Supported keys are state, left_force_history, left_state_history, "
+                "right_force_history, and right_state_history."
             )
 
     formatted["prompt"] = prompt

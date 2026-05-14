@@ -32,7 +32,11 @@ shape_meta:
         - ${task.img_height}
         - ${task.img_width}
     lowdim:
+      state: 13
+      left_force_history: 60
+      left_state_history: 130
       right_force_history: 60
+      right_state_history: 130
   task:
     type: vector
     dim: 512
@@ -49,4 +53,5 @@ dataset:
   use_ft: ${oc.select:algo.dataset.use_ft,false}
   ft_config: ${oc.select:algo.dataset.ft_config,null}
   ft_shift: ${oc.select:algo.dataset.ft_shift,1}
+  lowdim_stats_path: ${oc.select:algo.dataset.lowdim_stats_path,null}
   load_obs: ${training.load_obs}

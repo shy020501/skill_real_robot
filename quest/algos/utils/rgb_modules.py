@@ -211,7 +211,7 @@ class ResnetEncoder(nn.Module):
 
         ### 1. encode input (images) using convolutional layers
         assert remove_layer_num <= 5, "[error] please only remove <=5 layers"
-        weights = torchvision.models.ResNet18_Weights if pretrained else None
+        weights = torchvision.models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         layers = list(torchvision.models.resnet18(weights=weights).children())[
             :-remove_layer_num
         ]
@@ -369,5 +369,4 @@ class DINOEncoder(nn.Module):
 
     def output_shape(self, input_shape, shape_meta):
         return self.output_shape
-
 

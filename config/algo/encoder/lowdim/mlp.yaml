@@ -5,4 +5,13 @@ num_layers: 1
 history_len: 10
 ft_dim: 6
 conv_channels: 64
+cnn_features: [64, 128, 128]
 kernel_size: 3
+encoder_type: auto
+encoder_type_by_modality:
+  state: mlp
+  left_force_history: conv
+  left_state_history: mlp
+  right_force_history: conv
+  right_state_history: mlp
+input_dim_by_modality: {}

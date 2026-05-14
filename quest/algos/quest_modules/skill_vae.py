@@ -251,11 +251,15 @@ class SkillVAEFTAdaLN(SkillVAE):
                  *args,
                  ft_dim=6,
                  ft_downsample_mode='avg',
+                 ft_conv_strides=None,
+                 ft_conv_kernel_sizes=None,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.use_ft_conditioning = True
         self.ft_dim = ft_dim
         self.ft_downsample_mode = ft_downsample_mode
+        self.ft_conv_strides = list(ft_conv_strides) if ft_conv_strides is not None else None
+        self.ft_conv_kernel_sizes = list(ft_conv_kernel_sizes) if ft_conv_kernel_sizes is not None else None
 
         # common projection: (B, H, 6) or (B, H, S, 6) -> (..., D)
         self.ft_proj = nn.Linear(ft_dim, self.encoder_dim)
@@ -292,12 +296,16 @@ class SkillVAEFTAdaLN(SkillVAE):
         self.encoder = AdaLNTransformerEncoder(layer, len(self.encoder.layers))
 
     def _conv_strides(self):
+        if self.ft_conv_strides is not None:
+            return self.ft_conv_strides
         strides = [2] * int(np.log2(self.downsample_factor)) + [1]
         if len(strides) == 1:
             strides = [1, 1]
         return strides
 
     def _conv_kernel_sizes(self):
+        if self.ft_conv_kernel_sizes is not None:
+            return self.ft_conv_kernel_sizes
         kernel_sizes = [5] + [3] * int(np.log2(self.downsample_factor))
         if len(self._conv_strides()) == 2 and self.downsample_factor == 1:
             kernel_sizes = [3, 2]
@@ -335,6 +343,24 @@ class SkillVAEFTAdaLN(SkillVAE):
             return self.ft_avg_max_proj(torch.cat([avg, max_abs], dim=-1))
         raise ValueError(f"Pooling is not defined for mode {self.ft_downsample_mode}")
 
+    @staticmethod
+    def _deterministic_adaptive_avg_pool1d(x, target_len):
+        input_len = x.size(-1)
+        if input_len == target_len:
+            return x
+        if input_len % target_len == 0:
+            kernel_size = input_len // target_len
+            return F.avg_pool1d(x, kernel_size=kernel_size, stride=kernel_size)
+
+        # Match adaptive average pooling's variable-width binning without using
+        # adaptive_avg_pool1d, whose CUDA backward can be nondeterministic.
+        pooled = []
+        for i in range(target_len):
+            start = int(np.floor(i * input_len / target_len))
+            end = int(np.ceil((i + 1) * input_len / target_len))
+            pooled.append(x[..., start:end].mean(dim=-1))
+        return torch.stack(pooled, dim=-1)
+
     def _get_ft_cond(self, ft, target_len):
         if ft is None:
             return torch.zeros((1, target_len, self.encoder_dim), device=self.device)
@@ -352,7 +378,7 @@ class SkillVAEFTAdaLN(SkillVAE):
             if cond.size(1) != target_len:
                 cond = cond.transpose(1, 2)
                 if cond.size(-1) > target_len:
-                    cond = F.adaptive_avg_pool1d(cond, target_len)
+                    cond = self._deterministic_adaptive_avg_pool1d(cond, target_len)
                 else:
                     cond = F.interpolate(
                         cond,

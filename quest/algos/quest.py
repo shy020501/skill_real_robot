@@ -64,7 +64,7 @@ class QueST(ChunkPolicy):
             return optimizers
 
     def get_context(self, data):
-        obs_emb = self.obs_encode(data)
+        obs_emb = self.obs_encode_tokens(data)
         task_emb = self.get_task_emb(data).unsqueeze(1)
         context = torch.cat([task_emb, obs_emb], dim=1)
         return context

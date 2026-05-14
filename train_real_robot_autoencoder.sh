@@ -40,7 +40,7 @@ case "${ft_rate}" in
         ft_label="${ft_rate}"
         ;;
     100hz)
-        ft_source="force_history"
+        ft_source="right_force_history"
         ft_label="${ft_rate}"
         ;;
     *)
@@ -79,6 +79,10 @@ case "${variant_key}" in
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
         extra_args+=("algo.dataset.ft_config.use_threshold_mask=${use_threshold_mask}")
+        if [[ "${variant_key}" == "conv" && "${ft_rate}" == "100hz" ]]; then
+            extra_args+=("algo.ft_conv_strides=[5,4,2]")
+            extra_args+=("algo.ft_conv_kernel_sizes=[9,7,5]")
+        fi
         run_key="${variant_key}_${ft_label}"
         ;;
     *)

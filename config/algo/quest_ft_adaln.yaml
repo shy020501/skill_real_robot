@@ -24,6 +24,8 @@ policy:
     codebook_size: ${algo.codebook_size}
     ft_dim: 6
     ft_downsample_mode: ${algo.ft_downsample_mode}
+    ft_conv_strides: ${algo.ft_conv_strides}
+    ft_conv_kernel_sizes: ${algo.ft_conv_kernel_sizes}
   policy_prior:
     _target_: quest.algos.quest_modules.skill_gpt.SkillGPT
     action_dim: ${task.shape_meta.action_dim}
@@ -60,6 +62,8 @@ codebook_size: 1024
 skill_block_size: 32
 downsample_factor: 4
 ft_downsample_mode: avg
+ft_conv_strides: null
+ft_conv_kernel_sizes: null
 
 action_horizon: 8
 frame_stack: 1

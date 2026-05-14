@@ -1,19 +1,66 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 3 || $# -gt 6 ]]; then
-    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [data_prefix] [10hz|100hz] [masked|unmasked]"
-    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|force_history|state_force_history|all} [10hz|100hz] [masked|unmasked]"
+if [[ $# -lt 3 ]]; then
+    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|left_force_history|left_state_history|right_force_history|right_state_history|all}... [data_prefix] [10hz|100hz] [masked|unmasked]"
     exit 1
 fi
 
 variant_key="$1"
 device="$2"
-prior_key="$3"
 data_prefix="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos"
 ft_rate="10hz"
 mask_mode="unmasked"
-shift 3
+lowdim_modalities=()
+shift 2
+
+all_lowdim_modalities=(state left_force_history left_state_history right_force_history right_state_history)
+
+is_lowdim_modality() {
+    case "$1" in
+        state|left_force_history|left_state_history|right_force_history|right_state_history|all)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+lowdim_dim() {
+    case "$1" in
+        state)
+            echo 13
+            ;;
+        left_force_history|right_force_history)
+            echo 60
+            ;;
+        left_state_history|right_state_history)
+            echo 130
+            ;;
+        *)
+            echo "Unknown lowdim modality '$1'" >&2
+            exit 1
+            ;;
+    esac
+}
+
+join_by() {
+    local IFS="$1"
+    shift
+    echo "$*"
+}
+
+lowdim_override() {
+    local entries=()
+    local modality
+    for modality in "$@"; do
+        entries+=("${modality}:$(lowdim_dim "${modality}")")
+    done
+    local joined
+    joined=$(join_by "," "${entries[@]}")
+    echo "+task.shape_meta.observation.lowdim={${joined}}"
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -24,25 +71,28 @@ while [[ $# -gt 0 ]]; do
             mask_mode="$1"
             ;;
         *)
-            data_prefix="$1"
+            if is_lowdim_modality "$1"; then
+                if [[ "$1" == "all" ]]; then
+                    lowdim_modalities=("${all_lowdim_modalities[@]}")
+                else
+                    lowdim_modalities+=("$1")
+                fi
+            else
+                data_prefix="$1"
+            fi
             ;;
     esac
     shift
 done
 
+if [[ ${#lowdim_modalities[@]} -eq 0 ]]; then
+    lowdim_modalities=(state)
+fi
+
 if [[ ! -d "${data_prefix}" ]]; then
     echo "Data prefix does not exist: ${data_prefix}"
     exit 1
 fi
-
-case "${prior_key}" in
-    state|force_history|state_force_history|all)
-        ;;
-    *)
-        echo "Unknown prior '${prior_key}'. Expected one of: state, force_history, state_force_history, all"
-        exit 1
-        ;;
-esac
 
 case "${ft_rate}" in
     10hz)
@@ -50,7 +100,7 @@ case "${ft_rate}" in
         ft_label="${ft_rate}"
         ;;
     100hz)
-        ft_source="force_history"
+        ft_source="right_force_history"
         ft_label="${ft_rate}"
         ;;
     *)
@@ -89,6 +139,10 @@ case "${variant_key}" in
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
         extra_args+=("algo.dataset.ft_config.use_threshold_mask=${use_threshold_mask}")
+        if [[ "${variant_key}" == "conv" && "${ft_rate}" == "100hz" ]]; then
+            extra_args+=("algo.ft_conv_strides=[5,4,2]")
+            extra_args+=("algo.ft_conv_kernel_sizes=[9,7,5]")
+        fi
         run_key="${variant_key}_${ft_label}"
         ;;
     *)
@@ -109,11 +163,15 @@ common_args=(
     "algo.downsample_factor=4"
     "seed=0"
     "data_prefix=${data_prefix}"
+    "task.instruction_path=null"
     "device=${device}"
 )
 
 autoencoder_exp_name="lowdim_autoencoder_${run_key}"
 autoencoder_checkpoint_dir="./experiments/real_robot/REAL_ROBOT_MULTI/${algo_name}/${autoencoder_exp_name}/${variant}/0/stage_0"
+lowdim_name=$(join_by "_" "${lowdim_modalities[@]}")
+lowdim_arg=$(lowdim_override "${lowdim_modalities[@]}")
+clear_lowdim_arg="~task.shape_meta.observation.lowdim"
 
 if [[ ! -d "${autoencoder_checkpoint_dir}" ]]; then
     echo "Autoencoder checkpoint directory does not exist: ${autoencoder_checkpoint_dir}"
@@ -121,38 +179,20 @@ if [[ ! -d "${autoencoder_checkpoint_dir}" ]]; then
     exit 1
 fi
 
-if [[ "${prior_key}" == "all" ]]; then
-    prior_tasks=(state force_history state_force_history)
-else
-    prior_tasks=("${prior_key}")
-fi
-
 echo "[prior-only] variant=${variant}"
 echo "[prior-only] mask_mode=${mask_mode}"
 echo "[prior-only] checkpoint=${autoencoder_checkpoint_dir}"
-echo "[prior-only] tasks=${prior_tasks[*]}"
+echo "[prior-only] modalities=${lowdim_modalities[*]}"
 
-for task_key in "${prior_tasks[@]}"; do
-    case "${task_key}" in
-        state)
-            task_config="real_robot_state"
-            ;;
-        force_history)
-            task_config="real_robot_force_history"
-            ;;
-        state_force_history)
-            task_config="real_robot_state_force_history"
-            ;;
-    esac
-
-    echo "[stage1] ${variant} ${task_key}"
-    python train.py --config-name=train_prior.yaml \
-        "algo=${algo}" \
-        "variant_name=${variant}" \
-        "task=${task_config}" \
-        "exp_name=lowdim_${task_key}_${run_key}" \
-        "logging.group=${task_key}_${run_key}" \
-        "checkpoint_path=${autoencoder_checkpoint_dir}" \
-        "${common_args[@]}" \
-        "${extra_args[@]}"
-done
+echo "[stage1] ${variant} ${lowdim_name}"
+python train.py --config-name=train_prior.yaml \
+    "algo=${algo}" \
+    "variant_name=${variant}" \
+    "task=real_robot" \
+    "exp_name=lowdim_${lowdim_name}_${run_key}" \
+    "logging.group=${lowdim_name}_${run_key}" \
+    "checkpoint_path=${autoencoder_checkpoint_dir}" \
+    "${clear_lowdim_arg}" \
+    "${lowdim_arg}" \
+    "${common_args[@]}" \
+    "${extra_args[@]}"

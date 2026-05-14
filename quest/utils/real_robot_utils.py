@@ -14,7 +14,7 @@ from PIL import Image
 from quest.utils.force_torque_utils import (
     DEFAULT_FT_CONFIG,
     EPS,
-    butterworth_lowpass_sequence,
+    causal_butterworth_lowpass_sequence,
     compute_ft_stats_for_episodes,
     compute_mask_sequence,
     extract_force_history_sequence,
@@ -26,9 +26,9 @@ from quest.utils.force_torque_utils import (
 
 # IMAGE_KEYS = {"front_cam", "head_cam", "left_wrist_cam", "right_wrist_cam"}
 IMAGE_KEYS = {"front_cam", "right_wrist_cam"}
-FORCE_HISTORY_KEYS = ("right_force_history", "force_history")
-RIGHT_STATE_KEYS = ("state", "right_state")
-RIGHT_STATE_FORCE_HISTORY_KEY = "right_state_force_history"
+FORCE_HISTORY_KEYS = ("left_force_history", "right_force_history")
+STATE_HISTORY_KEYS = ("left_state_history", "right_state_history")
+RIGHT_STATE_KEYS = ("state",)
 RIGHT_STATE_FORCE_TORQUE_IDXS = (1, 2, 3, 10, 11, 12)
 PKL_RIGHT_GRIPPER_STATE_IDX = 19
 PKL_RIGHT_GRIPPER_ACTION_IDX = 13
@@ -116,7 +116,13 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
             return obs
         return {
             key: obs[key]
-            for key in ("state", "right_force_history", "force_history")
+            for key in (
+                "state",
+                "left_force_history",
+                "left_state_history",
+                "right_force_history",
+                "right_state_history",
+            )
             if key in obs
         }
 
@@ -251,17 +257,15 @@ def load_task_descriptions(task_descriptions=None, instruction_path=None):
         return json.load(f)
 
 
-def get_force_history_value(obs_t):
-    for force_key in FORCE_HISTORY_KEYS:
-        if force_key in obs_t:
-            return obs_t[force_key]
-    raise KeyError(
-        f"None of force history keys {FORCE_HISTORY_KEYS} found. "
-        f"Available keys: {list(obs_t.keys())}"
-    )
+def get_force_history_value(obs_t, key):
+    if key not in FORCE_HISTORY_KEYS:
+        raise KeyError(f"Unsupported force history key '{key}'. Expected one of {FORCE_HISTORY_KEYS}.")
+    if key not in obs_t:
+        raise KeyError(f"Observation is missing '{key}'. Available keys: {list(obs_t.keys())}")
+    return obs_t[key]
 
 
-def get_right_state_value(obs_t, remove_force=False):
+def get_right_state_value(obs_t, remove_force=True):
     arr = np.asarray(obs_t["state"])
     if arr.ndim == 2 and arr.shape[0] == 1:
         arr = arr[0]
@@ -269,6 +273,11 @@ def get_right_state_value(obs_t, remove_force=False):
     if remove_force:
         right_state = np.delete(right_state, RIGHT_STATE_FORCE_TORQUE_IDXS, axis=0)
     return right_state
+
+
+def remove_state_history_force_torque(state_history):
+    state_history = np.asarray(state_history, dtype=np.float32).squeeze()
+    return np.delete(state_history, RIGHT_STATE_FORCE_TORQUE_IDXS, axis=-1).astype(np.float32)
 
 
 def relabel_gripper_action(gripper_action, gripper_state):
@@ -298,40 +307,44 @@ def relabel_episode_gripper_actions_from_state(episode):
 
 def has_obs_key(obs_t, key):
     if key in FORCE_HISTORY_KEYS:
-        return any(force_key in obs_t for force_key in FORCE_HISTORY_KEYS)
+        return key in obs_t
     if key in RIGHT_STATE_KEYS:
         return "state" in obs_t
-    if key == RIGHT_STATE_FORCE_HISTORY_KEY:
-        return "state" in obs_t and any(force_key in obs_t for force_key in FORCE_HISTORY_KEYS)
     return key in obs_t
 
 
 def get_obs_value_with_alias(obs_t, key):
     if key in FORCE_HISTORY_KEYS:
-        return get_force_history_value(obs_t)
+        return get_force_history_value(obs_t, key)
     if key in RIGHT_STATE_KEYS:
         return get_right_state_value(obs_t)
-    if key == RIGHT_STATE_FORCE_HISTORY_KEY:
-        right_state_no_force = get_right_state_value(obs_t, remove_force=True)
-        force_history = np.asarray(get_force_history_value(obs_t)).squeeze().astype(np.float32).reshape(-1)
-        return np.concatenate([right_state_no_force, force_history], axis=0)
+    if key in STATE_HISTORY_KEYS:
+        return remove_state_history_force_torque(obs_t[key])
     return obs_t[key]
 
 
 def smooth_force_history_sequence(force_history, ft_config):
+    force_history = np.asarray(force_history, dtype=np.float32)
+    original_shape = force_history.shape
+    flat_force_history = force_history.reshape(-1, original_shape[-1])
+
     if ft_config["history_filter"] == "butterworth":
-        force_history = np.stack([
-            butterworth_lowpass_sequence(
-                history,
-                sample_rate_hz=ft_config["history_sample_rate_hz"],
-                cutoff_hz=ft_config["history_cutoff_hz"],
-                order=ft_config["history_filter_order"],
-            )
-            for history in force_history
-        ], axis=0)
+        flat_force_history = causal_butterworth_lowpass_sequence(
+            flat_force_history,
+            sample_rate_hz=ft_config["history_sample_rate_hz"],
+            cutoff_hz=ft_config["history_cutoff_hz"],
+            order=ft_config["history_filter_order"],
+        )
     elif ft_config["history_filter"] not in (None, "none"):
         raise ValueError(f"Unsupported history_filter: {ft_config['history_filter']}")
-    return force_history.astype(np.float32)
+    return flat_force_history.reshape(original_shape).astype(np.float32)
+
+
+def threshold_mask_force_history_sequence(force_history, ft_config):
+    force_history = np.asarray(force_history, dtype=np.float32)
+    flat_force_history = force_history.reshape(-1, force_history.shape[-1])
+    _, flat_mask = compute_mask_sequence(flat_force_history, config=ft_config)
+    return flat_mask.reshape(force_history.shape).astype(np.float32)
 
 
 def reduce_ft_history_sequence(force_history, ft_config):
@@ -347,6 +360,34 @@ def normalize_ft_sequence(ft, ft_stats):
     mean = np.asarray(ft_stats["mean"], dtype=np.float32)
     std = np.maximum(np.asarray(ft_stats["std"], dtype=np.float32), EPS)
     return ((ft - mean) / std).astype(np.float32)
+
+
+def load_lowdim_stats(path):
+    with open(path, "r") as f:
+        raw_stats = json.load(f)
+    stats = {}
+    for key, value in raw_stats.items():
+        if "mean" not in value or "std" not in value:
+            raise KeyError(f"lowdim_stats entry '{key}' must contain 'mean' and 'std'.")
+        stats[key] = {
+            "mean": np.asarray(value["mean"], dtype=np.float32),
+            "std": np.maximum(np.asarray(value["std"], dtype=np.float32), EPS),
+        }
+    return stats
+
+
+def normalize_lowdim_value(value, key, lowdim_stats):
+    if lowdim_stats is None or key not in lowdim_stats:
+        return value.astype(np.float32)
+    stats = lowdim_stats[key]
+    mean = stats["mean"]
+    std = stats["std"]
+    if value.shape[-1] != mean.shape[-1]:
+        raise ValueError(
+            f"Lowdim stats for '{key}' have dim {mean.shape[-1]}, "
+            f"but value shape is {value.shape}."
+        )
+    return ((value - mean) / std).astype(np.float32)
 
 
 # -------------------------------------------------
@@ -367,6 +408,7 @@ class RealWorldSequenceDataset(Dataset):
         ft_stats: Optional[Dict] = None,
         ft_config: Optional[Dict] = None,
         ft_shift: int = 1,
+        lowdim_stats: Optional[Dict] = None,
         load_obs: bool = True,
     ):
         self.episodes = episodes
@@ -381,6 +423,7 @@ class RealWorldSequenceDataset(Dataset):
         self.ft_shift = ft_shift
         self.load_obs = load_obs
         self.ft_config = {**DEFAULT_FT_CONFIG, **(ft_config or {})}
+        self.lowdim_stats = lowdim_stats
 
         self.n_demos = len(episodes)
 
@@ -390,16 +433,14 @@ class RealWorldSequenceDataset(Dataset):
         self.masked_ft_episodes = None
         self.ft_mask_episodes = None
         self.smoothed_state_ft_episodes = None
+        self.force_history_episodes = None
         self.smoothed_force_history_episodes = None
-        needs_lowdim_force_history = self.load_obs and any(
-            key in FORCE_HISTORY_KEYS or key == RIGHT_STATE_FORCE_HISTORY_KEY
-            for key in self.obs_keys
-        )
         needs_state_ft = self.use_ft and self.ft_config["ft_source"] == "state"
-        needs_force_history = (
-            needs_lowdim_force_history
-            or (self.use_ft and self.ft_config["ft_source"] == "force_history")
-        )
+        force_history_keys = set()
+        if self.load_obs:
+            force_history_keys.update(key for key in self.obs_keys if key in FORCE_HISTORY_KEYS)
+        if self.use_ft and self.ft_config["ft_source"] in FORCE_HISTORY_KEYS:
+            force_history_keys.add(self.ft_config["ft_source"])
         if needs_state_ft:
             self.smoothed_state_ft_episodes = []
             for ep in self.episodes:
@@ -408,13 +449,18 @@ class RealWorldSequenceDataset(Dataset):
                     smooth_ft_sequence(state_ft, ema_alpha=self.ft_config["ema_alpha"])
                 )
 
-        if needs_force_history:
-            self.smoothed_force_history_episodes = []
-            for ep in self.episodes:
-                force_history = extract_force_history_sequence(ep)
-                self.smoothed_force_history_episodes.append(
-                    smooth_force_history_sequence(force_history, self.ft_config)
-                )
+        if force_history_keys:
+            self.force_history_episodes = {}
+            self.smoothed_force_history_episodes = {}
+            for force_history_key in sorted(force_history_keys):
+                raw_episodes = []
+                smoothed_episodes = []
+                for ep in self.episodes:
+                    force_history = extract_force_history_sequence(ep, force_history_key=force_history_key)
+                    raw_episodes.append(force_history)
+                    smoothed_episodes.append(smooth_force_history_sequence(force_history, self.ft_config))
+                self.force_history_episodes[force_history_key] = raw_episodes
+                self.smoothed_force_history_episodes[force_history_key] = smoothed_episodes
 
         if self.use_ft:
             if ft_stats is None:
@@ -430,10 +476,21 @@ class RealWorldSequenceDataset(Dataset):
                     else:
                         ft_mask = np.ones_like(ft, dtype=np.float32)
                         masked_ft = ft
-                elif self.ft_config["ft_source"] == "force_history":
-                    ft = normalize_ft_sequence(self.smoothed_force_history_episodes[ep_idx], ft_stats)
-                    masked_ft = reduce_ft_history_sequence(ft, self.ft_config)
-                    ft_mask = np.ones_like(masked_ft, dtype=np.float32)
+                elif self.ft_config["ft_source"] in FORCE_HISTORY_KEYS:
+                    ft_source = self.ft_config["ft_source"]
+                    ft = normalize_ft_sequence(
+                        self.smoothed_force_history_episodes[ft_source][ep_idx],
+                        ft_stats,
+                    )
+                    if self.ft_config["use_threshold_mask"]:
+                        ft_mask = threshold_mask_force_history_sequence(ft, self.ft_config)
+                        masked_ft = ft * ft_mask
+                    else:
+                        ft_mask = np.ones_like(ft, dtype=np.float32)
+                        masked_ft = ft
+                    masked_ft = reduce_ft_history_sequence(masked_ft, self.ft_config)
+                    if self.ft_config["history_reduce"] not in (None, "none"):
+                        ft_mask = np.any(ft_mask, axis=1).astype(np.float32)
                 else:
                     raise ValueError(f"Unsupported ft_source: {self.ft_config['ft_source']}")
                 self.masked_ft_episodes.append(masked_ft)
@@ -523,18 +580,19 @@ class RealWorldSequenceDataset(Dataset):
 
             obs_list = []
             for t, obs_t in enumerate(observations):
-                if key in FORCE_HISTORY_KEYS and self.smoothed_force_history_episodes is not None:
-                    arr = self.smoothed_force_history_episodes[ep_idx][t]
-                elif key == RIGHT_STATE_FORCE_HISTORY_KEY and self.smoothed_force_history_episodes is not None:
-                    right_state_no_force = get_right_state_value(obs_t, remove_force=True)
-                    force_history = self.smoothed_force_history_episodes[ep_idx][t].reshape(-1)
-                    arr = np.concatenate([right_state_no_force, force_history], axis=0)
+                if (
+                    key in FORCE_HISTORY_KEYS
+                    and self.smoothed_force_history_episodes is not None
+                    and key in self.smoothed_force_history_episodes
+                ):
+                    arr = self.smoothed_force_history_episodes[key][ep_idx][t]
                 else:
                     arr = np.asarray(get_obs_value_with_alias(obs_t, key))
 
-                # right_force_history: (1, 10, 6), (10, 6), (1, 60), or (60,) -> (60,)
-                if key in FORCE_HISTORY_KEYS:
-                    arr = arr.squeeze().astype(np.float32).reshape(-1)
+                # history: keep (H, D) so sequence encoders can consume the temporal axis directly.
+                if key in FORCE_HISTORY_KEYS or key in STATE_HISTORY_KEYS:
+                    arr = arr.squeeze().astype(np.float32)
+                    arr = normalize_lowdim_value(arr, key, self.lowdim_stats)
 
                 # image: (1, H, W, C) -> (H, W, C)
                 elif key in IMAGE_KEYS:
@@ -544,6 +602,7 @@ class RealWorldSequenceDataset(Dataset):
 
                 else:
                     arr = arr.astype(np.float32)
+                    arr = normalize_lowdim_value(arr, key, self.lowdim_stats)
 
                 obs_list.append(arr)
 
@@ -607,6 +666,7 @@ def build_realworld_dataset(
     use_ft: bool = False,
     ft_config: Optional[Dict] = None,
     ft_shift: int = 1,
+    lowdim_stats_path: Optional[str] = None,
     load_obs: bool = True,
 ):
     """
@@ -640,6 +700,14 @@ def build_realworld_dataset(
     obs_keys += list(shape_meta["observation"]["lowdim"].keys())
 
     ft_config = {**DEFAULT_FT_CONFIG, **(ft_config or {})}
+    if lowdim_stats_path is None:
+        candidate = os.path.join(data_prefix, "lowdim_stats.json")
+        if os.path.exists(candidate):
+            lowdim_stats_path = candidate
+    lowdim_stats = load_lowdim_stats(lowdim_stats_path) if lowdim_stats_path is not None else None
+    if lowdim_stats_path is not None:
+        print(f"[INFO] Loaded lowdim stats from {lowdim_stats_path}")
+
     task_episode_items = []
     descriptions = []
     for task_name in task_names:
@@ -665,16 +733,22 @@ def build_realworld_dataset(
     ft_stats = None
     if use_ft:
         stats_path = ft_config.get("stats_path")
-        if stats_path is None and ft_config["ft_source"] == "state":
-            candidate = os.path.join(data_prefix, "force_torque_stats.json")
-            if os.path.exists(candidate):
+        if stats_path is None:
+            if ft_config["ft_source"] == "state":
+                candidate_name = "force_torque_stats.json"
+            elif ft_config["ft_source"] in FORCE_HISTORY_KEYS:
+                candidate_name = "force_history_stats.json"
+            else:
+                candidate_name = None
+            candidate = (
+                os.path.join(data_prefix, candidate_name)
+                if candidate_name is not None
+                else None
+            )
+            if candidate is not None and os.path.exists(candidate):
                 stats_path = candidate
 
         if stats_path is not None:
-            if ft_config["ft_source"] != "state":
-                raise ValueError(
-                    f"ft_config.stats_path is for state force stats, but ft_source={ft_config['ft_source']}"
-                )
             ft_stats = load_global_ft_stats_from_json(stats_path)
             print(f"[INFO] Loaded global force/torque stats from {stats_path}")
         else:
@@ -701,6 +775,7 @@ def build_realworld_dataset(
             ft_stats=ft_stats,
             ft_config=ft_config,
             ft_shift=ft_shift,
+            lowdim_stats=lowdim_stats,
             load_obs=load_obs,
         )
         manip_datasets.append(ds)
@@ -728,4 +803,3 @@ def build_realworld_dataset(
     print("=========================================================================\n")
 
     return concat_dataset
-

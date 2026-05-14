@@ -53,12 +53,36 @@ class SkillGPT(nn.Module):
         x = self.add_positional_emb(x)
         x = torch.cat([context, x], dim=1)
         x = self.drop(x)
-        mask = nn.Transformer.generate_square_subsequent_mask(x.size(1),x.device)
-        x = self.decoder(x, mask=mask, is_causal=True)
+        mask = self._context_skill_mask(context.size(1), idx.size(1), x.device)
+        x = self.decoder(x, mask=mask)
         x = x[:, context.size(1):, :]
         x = self.lnf(x)
         logits = self.head(x)
         return logits
+
+    @staticmethod
+    def _context_skill_mask(context_len, skill_len, device):
+        total_len = context_len + skill_len
+        mask = torch.zeros((total_len, total_len), device=device)
+        if skill_len > 0:
+            context_to_skill = torch.ones(
+                (context_len, skill_len),
+                device=device,
+                dtype=torch.bool,
+            )
+            skill_causal = torch.triu(
+                torch.ones((skill_len, skill_len), device=device, dtype=torch.bool),
+                diagonal=1,
+            )
+            mask[:context_len, context_len:] = mask[:context_len, context_len:].masked_fill(
+                context_to_skill,
+                float("-inf"),
+            )
+            mask[context_len:, context_len:] = mask[context_len:, context_len:].masked_fill(
+                skill_causal,
+                float("-inf"),
+            )
+        return mask
         
     def get_indices_top_k(self, context, codebook_size):
         x = torch.ones((context.shape[0], 1), device=self.device, dtype=torch.long) * self.start_token
@@ -85,5 +109,4 @@ def top_k_sampling(logits, k, temperature=1.0):
     # Map the sampled index back to the original logits tensor
     original_indices = top_indices.gather(-1, sampled_indices)
     return original_indices
-
 
