@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Keep startup libraries from briefly fanning out across all CPU cores.
+# Override these from the shell if a run needs more CPU-side throughput.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
 if [[ $# -lt 3 ]]; then
     echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} {state|left_force_history|left_state_history|right_force_history|right_state_history|all}... [data_prefix] [10hz|100hz] [masked|unmasked]"
     exit 1
@@ -156,7 +164,7 @@ common_args=(
     "training.save_all_checkpoints=true"
     "training.use_amp=false"
     "train_dataloader.persistent_workers=true"
-    "train_dataloader.num_workers=6"
+    "train_dataloader.num_workers=2"
     "train_dataloader.multiprocessing_context=fork"
     "make_unique_experiment_dir=false"
     "algo.skill_block_size=32"

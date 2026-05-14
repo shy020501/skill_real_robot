@@ -127,8 +127,8 @@ def save_state(state_dict, path):
     save_dict = extract_state_dicts(state_dict)
     torch.save(save_dict, path)
 
-def load_state(path):
-    return torch.load(path)
+def load_state(path, map_location=None):
+    return torch.load(path, map_location=map_location)
 
 def torch_save_model(model, optimizer, scheduler, model_path, cfg=None):
     torch.save(

@@ -76,7 +76,7 @@ def main(cfg):
     if checkpoint_path is not None:
         checkpoint_path = utils.get_latest_checkpoint(checkpoint_path)
         print(f'loading from checkpoint {checkpoint_path}')
-        state_dict = utils.load_state(checkpoint_path)
+        state_dict = utils.load_state(checkpoint_path, map_location="cpu")
         loaded_state_dict = state_dict['model']
         
         # Below line allows loading state dicts with some mismatched parameters
@@ -87,6 +87,10 @@ def main(cfg):
             print('loading from checkpoint')
             for optimizer, opt_state_dict in zip(optimizers, state_dict['optimizers']):
                 optimizer.load_state_dict(opt_state_dict)
+                for state in optimizer.state.values():
+                    for k, v in state.items():
+                        if torch.is_tensor(v):
+                            state[k] = v.to(device)
             for scheduler, sch_state_dict in zip(schedulers, state_dict['schedulers']):
                 scheduler.load_state_dict(sch_state_dict)
             scaler.load_state_dict(state_dict['scaler'])
