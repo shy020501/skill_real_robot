@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 || $# -gt 5 ]]; then
-    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked]"
-    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [10hz|100hz] [masked|unmasked]"
+# Keep startup libraries from briefly fanning out across all CPU cores.
+# Override these from the shell if a run needs more CPU-side throughput.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
+
+if [[ $# -lt 2 || $# -gt 6 ]]; then
+    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked] [task-wise|task-agnostic]"
+    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [10hz|100hz] [masked|unmasked] [task-wise|task-agnostic]"
     exit 1
 fi
 
 variant_key="$1"
 device="$2"
 data_prefix="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos"
+task_agnostic_norm_stats_path="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos/lowdim_stats.json"
 ft_rate="10hz"
 mask_mode="unmasked"
+norm_mode="task-wise"
 shift 2
 
 while [[ $# -gt 0 ]]; do
@@ -21,6 +32,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         masked|unmasked)
             mask_mode="$1"
+            ;;
+        task-wise|task_wise|taskwise)
+            norm_mode="task-wise"
+            ;;
+        task-agnostic|task_agnostic|agnostic)
+            norm_mode="task-agnostic"
             ;;
         *)
             data_prefix="$1"
@@ -38,13 +55,34 @@ case "${ft_rate}" in
     10hz)
         ft_source="state"
         ft_label="${ft_rate}"
+        norm_stats_key="force"
         ;;
     100hz)
         ft_source="right_force_history"
         ft_label="${ft_rate}"
+        norm_stats_key="right_force_history"
         ;;
     *)
         echo "Unknown FT rate '${ft_rate}'. Expected one of: 10hz, 100hz"
+        exit 1
+        ;;
+esac
+
+case "${norm_mode}" in
+    task-wise)
+        norm_label=""
+        norm_stats_path=""
+        ;;
+    task-agnostic)
+        norm_label="_task_agnostic_norm"
+        norm_stats_path="${task_agnostic_norm_stats_path}"
+        if [[ ! -f "${norm_stats_path}" ]]; then
+            echo "Task-agnostic lowdim stats file does not exist: ${norm_stats_path}"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Unknown norm mode '${norm_mode}'. Expected one of: task-wise, task-agnostic"
         exit 1
         ;;
 esac
@@ -79,11 +117,15 @@ case "${variant_key}" in
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
         extra_args+=("algo.dataset.ft_config.use_threshold_mask=${use_threshold_mask}")
+        if [[ "${norm_mode}" == "task-agnostic" ]]; then
+            extra_args+=("algo.dataset.ft_config.norm_stats_path=${norm_stats_path}")
+            extra_args+=("algo.dataset.ft_config.norm_stats_key=${norm_stats_key}")
+        fi
         if [[ "${variant_key}" == "conv" && "${ft_rate}" == "100hz" ]]; then
             extra_args+=("algo.ft_conv_strides=[5,4,2]")
             extra_args+=("algo.ft_conv_kernel_sizes=[9,7,5]")
         fi
-        run_key="${variant_key}_${ft_label}"
+        run_key="${variant_key}_${ft_label}${norm_label}"
         ;;
     *)
         echo "Unknown variant '${variant_key}'. Expected one of: quest, max, avg, avg_max, conv"
@@ -111,6 +153,7 @@ autoencoder_checkpoint_dir="./experiments/real_robot/REAL_ROBOT_MULTI/${algo_nam
 
 echo "[stage0-only] variant=${variant}"
 echo "[stage0-only] mask_mode=${mask_mode}"
+echo "[stage0-only] norm_mode=${norm_mode}"
 echo "[stage0-only] checkpoint=${autoencoder_checkpoint_dir}"
 python train.py --config-name=train_autoencoder.yaml \
     "algo=${algo}" \

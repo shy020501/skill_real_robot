@@ -19,6 +19,7 @@ from quest.utils.force_torque_utils import (
     compute_mask_sequence,
     extract_force_history_sequence,
     extract_ft_sequence,
+    load_ft_stats_from_lowdim_json,
     load_global_ft_stats_from_json,
     reduce_force_history,
     smooth_ft_sequence,
@@ -732,33 +733,41 @@ def build_realworld_dataset(
 
     ft_stats = None
     if use_ft:
-        stats_path = ft_config.get("stats_path")
-        if stats_path is None:
-            if ft_config["ft_source"] == "state":
-                candidate_name = "force_torque_stats.json"
-            elif ft_config["ft_source"] in FORCE_HISTORY_KEYS:
-                candidate_name = "force_history_stats.json"
-            else:
-                candidate_name = None
-            candidate = (
-                os.path.join(data_prefix, candidate_name)
-                if candidate_name is not None
-                else None
-            )
-            if candidate is not None and os.path.exists(candidate):
-                stats_path = candidate
-
-        if stats_path is not None:
-            ft_stats = load_global_ft_stats_from_json(stats_path)
-            print(f"[INFO] Loaded global force/torque stats from {stats_path}")
+        norm_stats_path = ft_config.get("norm_stats_path")
+        norm_stats_key = ft_config.get("norm_stats_key")
+        if norm_stats_path is not None:
+            if norm_stats_key is None:
+                raise ValueError("ft_config.norm_stats_key must be set when norm_stats_path is set.")
+            ft_stats = load_ft_stats_from_lowdim_json(norm_stats_path, norm_stats_key)
+            print(f"[INFO] Loaded FT norm stats from {norm_stats_path} key={norm_stats_key}")
         else:
-            all_episodes = [
-                ep
-                for _, episodes in task_episode_items
-                for ep in episodes
-            ]
-            ft_stats = compute_ft_stats_for_episodes(all_episodes, config=ft_config)
-            print(f"[INFO] Computed global force/torque stats from {len(all_episodes)} episodes")
+            stats_path = ft_config.get("stats_path")
+            if stats_path is None:
+                if ft_config["ft_source"] == "state":
+                    candidate_name = "force_torque_stats.json"
+                elif ft_config["ft_source"] in FORCE_HISTORY_KEYS:
+                    candidate_name = "force_history_stats.json"
+                else:
+                    candidate_name = None
+                candidate = (
+                    os.path.join(data_prefix, candidate_name)
+                    if candidate_name is not None
+                    else None
+                )
+                if candidate is not None and os.path.exists(candidate):
+                    stats_path = candidate
+
+            if stats_path is not None:
+                ft_stats = load_global_ft_stats_from_json(stats_path)
+                print(f"[INFO] Loaded global force/torque stats from {stats_path}")
+            else:
+                all_episodes = [
+                    ep
+                    for _, episodes in task_episode_items
+                    for ep in episodes
+                ]
+                ft_stats = compute_ft_stats_for_episodes(all_episodes, config=ft_config)
+                print(f"[INFO] Computed global force/torque stats from {len(all_episodes)} episodes")
 
     manip_datasets = []
     for task_name, episodes in task_episode_items:

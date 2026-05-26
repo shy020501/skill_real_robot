@@ -18,10 +18,20 @@ from quest.utils.real_robot_utils import (
 EPS = 1e-8
 DEFAULT_KEYS = (
     "state",
+    "force",
     "left_force_history",
     "left_state_history",
     "right_force_history",
     "right_state_history",
+)
+FORCE_STATE_IDXS = (20, 21, 22, 29, 30, 31)
+FORCE_COMPONENTS = (
+    "right/tcp_force_x",
+    "right/tcp_force_y",
+    "right/tcp_force_z",
+    "right/tcp_torque_x",
+    "right/tcp_torque_y",
+    "right/tcp_torque_z",
 )
 
 
@@ -56,9 +66,25 @@ def make_accumulator(dim):
     }
 
 
+def extract_force_from_state(obs):
+    state = np.asarray(obs["state"], dtype=np.float32).squeeze()
+    if state.shape[-1] <= max(FORCE_STATE_IDXS):
+        raise ValueError(
+            f"Cannot extract force stats from state with shape {state.shape}; "
+            f"need indices up to {max(FORCE_STATE_IDXS)}."
+        )
+    return state[..., FORCE_STATE_IDXS]
+
+
 def collect_episode_values(episode, key, ft_config):
     observations = episode.get("observations", [])
-    if len(observations) == 0 or key not in observations[0] and key != "state":
+    if len(observations) == 0:
+        return None
+    if key == "force":
+        if "state" not in observations[0]:
+            return None
+        return np.stack([extract_force_from_state(obs) for obs in observations], axis=0)
+    if key not in observations[0] and key != "state":
         return None
 
     if key in FORCE_HISTORY_KEYS:
@@ -106,11 +132,15 @@ def compute_lowdim_stats(data_prefix, keys, ft_config):
                     )
                 update_accumulator(accumulators[key], values)
 
-    return {
-        key: finalize_accumulator(acc)
-        for key, acc in accumulators.items()
-        if acc["count"] > 0
-    }
+    stats = {}
+    for key, acc in accumulators.items():
+        if acc["count"] == 0:
+            continue
+        stats[key] = finalize_accumulator(acc)
+        if key == "force":
+            stats[key]["state_indices"] = list(FORCE_STATE_IDXS)
+            stats[key]["components"] = list(FORCE_COMPONENTS)
+    return stats
 
 
 def main():

@@ -80,6 +80,8 @@ dataset:
   ft_config:
     ft_source: state
     stats_path: null
+    norm_stats_path: null
+    norm_stats_key: null
     use_threshold_mask: false
     ema_alpha: 0.3
     history_filter: butterworth

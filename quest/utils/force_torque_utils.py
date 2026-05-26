@@ -15,6 +15,8 @@ EPS = 1e-8
 DEFAULT_FT_CONFIG = {
     "ft_source": "state",
     "stats_path": None,
+    "norm_stats_path": None,
+    "norm_stats_key": None,
     "use_threshold_mask": False,
     "ema_alpha": 0.3,
     "history_filter": "butterworth",
@@ -30,6 +32,29 @@ DEFAULT_FT_CONFIG = {
     "min_active_len": 3,
     "max_gap_len": 3,
 }
+
+
+def load_ft_stats_from_lowdim_json(path, key):
+    with open(path, "r") as f:
+        lowdim_stats = json.load(f)
+
+    if key not in lowdim_stats:
+        raise KeyError(
+            f"lowdim stats file '{path}' does not contain key '{key}'. "
+            f"Available keys: {list(lowdim_stats.keys())}"
+        )
+
+    stats = lowdim_stats[key]
+    if "mean" not in stats or "std" not in stats:
+        raise KeyError(f"lowdim stats entry '{key}' must contain 'mean' and 'std'.")
+
+    mean = np.asarray(stats["mean"], dtype=np.float32)
+    std = np.maximum(np.asarray(stats["std"], dtype=np.float32), EPS)
+    if mean.shape[-1] != 6:
+        raise ValueError(
+            f"FT stats from lowdim key '{key}' must have dim 6, got {mean.shape[-1]}."
+        )
+    return {"mean": mean, "std": std}
 
 
 def load_global_ft_stats_from_json(path):

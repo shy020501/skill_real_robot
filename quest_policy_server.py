@@ -116,11 +116,10 @@ class QueSTPolicy:
         self.task_type = shape_meta.task.type
         self.task_embedding_format = self.cfg.task.get("task_embedding_format", "clip")
         self._task_emb_cache = {}
-        self.ft_filter = OnlineForceHistoryFilter(
-            OmegaConf.to_container(self.cfg.algo.dataset.get("ft_config", None), resolve=True)
-            if "dataset" in self.cfg.algo
-            else None
-        )
+        ft_config = OmegaConf.select(self.cfg, "algo.dataset.ft_config")
+        if ft_config is not None:
+            ft_config = OmegaConf.to_container(ft_config, resolve=True)
+        self.ft_filter = OnlineForceHistoryFilter(ft_config)
         self.lowdim_stats = self._load_lowdim_stats()
 
     def _load_policy(self, checkpoint_path):

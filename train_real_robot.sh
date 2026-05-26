@@ -2,15 +2,17 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked] [state|left_force_history|left_state_history|right_force_history|right_state_history|all]..."
+    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked] [task-wise|task-agnostic] [state|left_force_history|left_state_history|right_force_history|right_state_history|all]..."
     exit 1
 fi
 
 variant_key="$1"
 device="$2"
 data_prefix="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos"
+task_agnostic_norm_stats_path="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos/lowdim_stats.json"
 ft_rate="10hz"
 mask_mode="unmasked"
+norm_mode="task-wise"
 lowdim_modalities=()
 shift 2
 
@@ -70,6 +72,12 @@ while [[ $# -gt 0 ]]; do
         masked|unmasked)
             mask_mode="$1"
             ;;
+        task-wise|task_wise|taskwise)
+            norm_mode="task-wise"
+            ;;
+        task-agnostic|task_agnostic|agnostic)
+            norm_mode="task-agnostic"
+            ;;
         *)
             if is_lowdim_modality "$1"; then
                 if [[ "$1" == "all" ]]; then
@@ -98,13 +106,34 @@ case "${ft_rate}" in
     10hz)
         ft_source="state"
         ft_label="${ft_rate}"
+        norm_stats_key="force"
         ;;
     100hz)
         ft_source="right_force_history"
         ft_label="${ft_rate}"
+        norm_stats_key="right_force_history"
         ;;
     *)
         echo "Unknown FT rate '${ft_rate}'. Expected one of: 10hz, 100hz"
+        exit 1
+        ;;
+esac
+
+case "${norm_mode}" in
+    task-wise)
+        norm_label=""
+        norm_stats_path=""
+        ;;
+    task-agnostic)
+        norm_label="_task_agnostic_norm"
+        norm_stats_path="${task_agnostic_norm_stats_path}"
+        if [[ ! -f "${norm_stats_path}" ]]; then
+            echo "Task-agnostic lowdim stats file does not exist: ${norm_stats_path}"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Unknown norm mode '${norm_mode}'. Expected one of: task-wise, task-agnostic"
         exit 1
         ;;
 esac
@@ -139,11 +168,15 @@ case "${variant_key}" in
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
         extra_args+=("algo.dataset.ft_config.use_threshold_mask=${use_threshold_mask}")
+        if [[ "${norm_mode}" == "task-agnostic" ]]; then
+            extra_args+=("algo.dataset.ft_config.norm_stats_path=${norm_stats_path}")
+            extra_args+=("algo.dataset.ft_config.norm_stats_key=${norm_stats_key}")
+        fi
         if [[ "${variant_key}" == "conv" && "${ft_rate}" == "100hz" ]]; then
             extra_args+=("algo.ft_conv_strides=[5,4,2]")
             extra_args+=("algo.ft_conv_kernel_sizes=[9,7,5]")
         fi
-        run_key="${variant_key}_${ft_label}"
+        run_key="${variant_key}_${ft_label}${norm_label}"
         ;;
     *)
         echo "Unknown variant '${variant_key}'. Expected one of: quest, max, avg, avg_max, conv"
@@ -156,14 +189,14 @@ common_args=(
     "training.save_all_checkpoints=true"
     "training.use_amp=false"
     "train_dataloader.persistent_workers=true"
-    "train_dataloader.num_workers=2"
+    "train_dataloader.num_workers=4"
     "train_dataloader.multiprocessing_context=fork"
     "make_unique_experiment_dir=false"
     "algo.skill_block_size=32"
     "algo.downsample_factor=4"
     "seed=0"
     "data_prefix=${data_prefix}"
-    "task.instruction_path=null"
+    "task.instruction_path=${data_prefix}/instructions.json"
     "device=${device}"
 )
 
@@ -173,7 +206,7 @@ lowdim_name=$(join_by "_" "${lowdim_modalities[@]}")
 lowdim_arg=$(lowdim_override "${lowdim_modalities[@]}")
 clear_lowdim_arg="~task.shape_meta.observation.lowdim"
 
-echo "[stage0] ${variant} mask_mode=${mask_mode}"
+echo "[stage0] ${variant} mask_mode=${mask_mode} norm_mode=${norm_mode}"
 python train.py --config-name=train_autoencoder.yaml \
     "algo=${algo}" \
     "variant_name=${variant}" \
@@ -185,7 +218,7 @@ python train.py --config-name=train_autoencoder.yaml \
     "${common_args[@]}" \
     "${extra_args[@]}"
 
-echo "[stage1] modalities=${lowdim_modalities[*]}"
+echo "[stage1] modalities=${lowdim_modalities[*]} norm_mode=${norm_mode}"
 python train.py --config-name=train_prior.yaml \
     "algo=${algo}" \
     "variant_name=${variant}" \
