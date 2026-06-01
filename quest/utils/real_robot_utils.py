@@ -163,6 +163,108 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
 
         return trimmed_ep
 
+    def zero_like_episode_value(value):
+        if isinstance(value, dict):
+            return {k: zero_like_episode_value(v) for k, v in value.items()}
+        if isinstance(value, np.ndarray):
+            return np.zeros_like(value)
+        if torch.is_tensor(value):
+            return torch.zeros_like(value)
+        if isinstance(value, (list, tuple)):
+            return type(value)(zero_like_episode_value(v) for v in value)
+        if isinstance(value, (bool, np.bool_)):
+            return False
+        if isinstance(value, (int, float, np.number)):
+            return type(value)(0)
+        return 0
+
+    def copy_episode_value(value):
+        if isinstance(value, dict):
+            return {k: copy_episode_value(v) for k, v in value.items()}
+        if isinstance(value, np.ndarray):
+            return value.copy()
+        if torch.is_tensor(value):
+            return value.clone()
+        if isinstance(value, list):
+            return [copy_episode_value(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(copy_episode_value(v) for v in value)
+        return value
+
+    def leading_pad_episode_value(key, value):
+        if key == "state":
+            return copy_episode_value(value)
+        if isinstance(value, dict):
+            return {
+                child_key: copy_episode_value(child_value)
+                if child_key == "state"
+                else zero_like_episode_value(child_value)
+                for child_key, child_value in value.items()
+            }
+        return zero_like_episode_value(value)
+
+    def force_initial_gripper_open(ep: Dict) -> None:
+        observations = ep.get("observations", [])
+        if len(observations) == 0:
+            return
+
+        obs0 = observations[0]
+        if not isinstance(obs0, dict) or "state" not in obs0:
+            return
+
+        state = np.asarray(obs0["state"]).copy()
+        flat_state = state.reshape(-1)
+        if flat_state.shape[0] <= PKL_RIGHT_GRIPPER_STATE_IDX:
+            return
+
+        flat_state[PKL_RIGHT_GRIPPER_STATE_IDX] = 1.0
+        obs0 = dict(obs0)
+        obs0["state"] = flat_state.reshape(state.shape)
+        observations[0] = obs0
+
+    def trim_zero_action_episode_with_leading_keep(
+        ep: Dict,
+        leading_keep: int = 32,
+        trailing_keep: int = 5,
+    ) -> Optional[Dict]:
+        """
+        임시 함수: 앞쪽 zero-action은 정확히 leading_keep step 남김.
+        부족하면 앞에 zero padding을 추가하고, 많으면 leading_keep step만 유지.
+        뒤쪽은 trim_zero_action_episode와 동일하게 trailing_keep step 유지.
+        """
+        if "actions" not in ep or len(ep["actions"]) == 0:
+            return None
+
+        actions = [np.asarray(a) for a in ep["actions"]]
+        T = len(actions)
+
+        start_idx = 0
+        while start_idx < T and np.all(actions[start_idx] == 0):
+            start_idx += 1
+
+        if start_idx == T:
+            return None
+
+        end_idx = T - 1
+        while end_idx >= 0 and np.all(actions[end_idx] == 0):
+            end_idx -= 1
+
+        trim_start = max(0, start_idx - leading_keep)
+        trim_end = min(T, end_idx + 1 + trailing_keep)
+        pad_front = max(0, leading_keep - start_idx)
+
+        trimmed_ep = {}
+        for k, v in ep.items():
+            trimmed_values = list(v[trim_start:trim_end])
+            if pad_front > 0:
+                trimmed_values = [
+                    leading_pad_episode_value(k, v[0])
+                    for _ in range(pad_front)
+                ] + trimmed_values
+            trimmed_ep[k] = trimmed_values
+
+        return trimmed_ep
+    
     for pkl_path in pkl_files:
         with open(pkl_path, "rb") as f:
             data = pickle.load(f)
@@ -183,7 +285,9 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
 
             if done:
                 ep = {k: cur[k] for k in keys}
+                force_initial_gripper_open(ep)
                 ep = trim_zero_action_episode(ep, trailing_keep=5)
+                # ep = trim_zero_action_episode_with_leading_keep(ep, leading_keep=32, trailing_keep=5)
                 if ep is not None and len(ep["actions"]) > 0:
                     episodes.append(ep)
                 cur = defaultdict(list)
@@ -191,7 +295,9 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
         # 마지막 episode가 dones=True 없이 끝난 경우
         if len(cur) > 0 and len(next(iter(cur.values()))) > 0:
             ep = {k: cur[k] for k in keys}
+            force_initial_gripper_open(ep)
             ep = trim_zero_action_episode(ep, trailing_keep=5)
+            # ep = trim_zero_action_episode_with_leading_keep(ep, leading_keep=32, trailing_keep=5)
             if ep is not None and len(ep["actions"]) > 0:
                 episodes.append(ep)
 
@@ -430,6 +536,22 @@ class RealWorldSequenceDataset(Dataset):
 
         for ep in self.episodes:
             relabel_episode_gripper_actions_from_state(ep)
+
+        for ep_idx, ep in enumerate(self.episodes):
+            actions = ep.get("actions", [])
+            if len(actions) == 0:
+                continue
+
+            action0 = np.asarray(actions[0], dtype=np.float32).reshape(-1)
+            if action0.shape[0] <= PKL_RIGHT_GRIPPER_ACTION_IDX:
+                continue
+
+            gripper_action = action0[PKL_RIGHT_GRIPPER_ACTION_IDX]
+            if gripper_action < 0:
+                raise ValueError(
+                    f"-1 gripper action in step 0: ep_idx={ep_idx}, "
+                    f"gripper_action={gripper_action}"
+                )
 
         self.masked_ft_episodes = None
         self.ft_mask_episodes = None

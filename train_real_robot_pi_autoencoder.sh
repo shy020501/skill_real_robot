@@ -2,28 +2,63 @@
 set -euo pipefail
 
 # Keep startup libraries from briefly fanning out across all CPU cores.
-# Override these from the shell if a run needs more CPU-side throughput.
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${script_dir}"
 
-if [[ $# -lt 2 || $# -gt 6 ]]; then
-    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked] [task-wise|task-agnostic]"
-    echo "       $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [10hz|100hz] [masked|unmasked] [task-wise|task-agnostic]"
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 {quest|max|avg|avg_max|conv} {cuda:N|cpu} [data_prefix] [10hz|100hz] [masked|unmasked]"
     exit 1
 fi
 
 variant_key="$1"
 device="$2"
 data_prefix="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos"
-task_agnostic_norm_stats_path="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_robot/demos/lowdim_stats.json"
 ft_rate="10hz"
 mask_mode="unmasked"
-norm_mode="task-wise"
 shift 2
+
+wait_for_gpu_if_needed() {
+    local gpu_index
+    local used_mb
+    local pids
+    local poll_seconds="${GPU_WAIT_POLL_SECONDS:-60}"
+    local free_memory_threshold_mb="${GPU_FREE_MEMORY_THRESHOLD_MB:-100}"
+
+    if [[ "${device}" == "cpu" ]]; then
+        return 0
+    fi
+
+    if [[ ! "${device}" =~ ^cuda:([0-9]+)$ ]]; then
+        echo "[gpu-wait] Skip GPU availability check for device=${device}"
+        return 0
+    fi
+
+    gpu_index="${BASH_REMATCH[1]}"
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        echo "[gpu-wait] nvidia-smi not found; cannot check ${device}"
+        return 0
+    fi
+
+    echo "[gpu-wait] Waiting for ${device} to be free..."
+    while true; do
+        used_mb="$(nvidia-smi -i "${gpu_index}" --query-gpu=memory.used --format=csv,noheader,nounits | tr -d " ")"
+        pids="$(nvidia-smi -i "${gpu_index}" --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed "/^[[:space:]]*$/d" || true)"
+
+        if [[ -z "${pids}" && "${used_mb}" -le "${free_memory_threshold_mb}" ]]; then
+            echo "[gpu-wait] ${device} is free: memory_used=${used_mb}MiB"
+            return 0
+        fi
+
+        echo "[gpu-wait] ${device} busy: memory_used=${used_mb}MiB pids=${pids:-none}; retry in ${poll_seconds}s"
+        sleep "${poll_seconds}"
+    done
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -32,12 +67,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         masked|unmasked)
             mask_mode="$1"
-            ;;
-        task-wise|task_wise|taskwise)
-            norm_mode="task-wise"
-            ;;
-        task-agnostic|task_agnostic|agnostic)
-            norm_mode="task-agnostic"
             ;;
         *)
             data_prefix="$1"
@@ -51,38 +80,23 @@ if [[ ! -d "${data_prefix}" ]]; then
     exit 1
 fi
 
+pi_stats_path="${data_prefix}/pi_stats.json"
+if [[ ! -f "${pi_stats_path}" ]]; then
+    echo "[stats] ${pi_stats_path} does not exist; computing it now."
+    python scripts/compute_stats_pi.py --data_prefix "${data_prefix}" --output "${pi_stats_path}"
+fi
+
 case "${ft_rate}" in
     10hz)
         ft_source="state"
         ft_label="${ft_rate}"
-        norm_stats_key="force"
         ;;
     100hz)
         ft_source="right_force_history"
         ft_label="${ft_rate}"
-        norm_stats_key="right_force_history"
         ;;
     *)
         echo "Unknown FT rate '${ft_rate}'. Expected one of: 10hz, 100hz"
-        exit 1
-        ;;
-esac
-
-case "${norm_mode}" in
-    task-wise)
-        norm_label=""
-        norm_stats_path=""
-        ;;
-    task-agnostic)
-        norm_label="_task_agnostic_norm"
-        norm_stats_path="${task_agnostic_norm_stats_path}"
-        if [[ ! -f "${norm_stats_path}" ]]; then
-            echo "Task-agnostic lowdim stats file does not exist: ${norm_stats_path}"
-            exit 1
-        fi
-        ;;
-    *)
-        echo "Unknown norm mode '${norm_mode}'. Expected one of: task-wise, task-agnostic"
         exit 1
         ;;
 esac
@@ -103,30 +117,25 @@ case "${mask_mode}" in
 esac
 
 extra_args=()
-run_key="${variant_key}"
+run_key="${variant_key}_pi"
 case "${variant_key}" in
     quest)
         algo="quest"
         algo_name="quest"
-        variant="${variant_prefix}block_32_ds_4_quest"
-        # variant="${variant_prefix}block_32_ds_4_quest_32_zero"
+        variant="${variant_prefix}block_48_ds_4_quest_pi"
         ;;
     max|avg|avg_max|conv)
         algo="quest_ft_adaln"
         algo_name="quest_ft_adaln"
-        variant="${variant_prefix}block_32_ds_4_ft_${variant_key}"
+        variant="${variant_prefix}block_48_ds_4_ft_${variant_key}_pi"
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
         extra_args+=("algo.dataset.ft_config.use_threshold_mask=${use_threshold_mask}")
-        if [[ "${norm_mode}" == "task-agnostic" ]]; then
-            extra_args+=("algo.dataset.ft_config.norm_stats_path=${norm_stats_path}")
-            extra_args+=("algo.dataset.ft_config.norm_stats_key=${norm_stats_key}")
-        fi
         if [[ "${variant_key}" == "conv" && "${ft_rate}" == "100hz" ]]; then
             extra_args+=("algo.ft_conv_strides=[5,4,2]")
             extra_args+=("algo.ft_conv_kernel_sizes=[9,7,5]")
         fi
-        run_key="${variant_key}_${ft_label}${norm_label}"
+        run_key="${variant_key}_${ft_label}_pi"
         ;;
     *)
         echo "Unknown variant '${variant_key}'. Expected one of: quest, max, avg, avg_max, conv"
@@ -139,27 +148,32 @@ common_args=(
     "training.save_all_checkpoints=true"
     "training.use_amp=false"
     "train_dataloader.persistent_workers=true"
-    "train_dataloader.num_workers=6"
+    "train_dataloader.num_workers=4"
     "train_dataloader.multiprocessing_context=fork"
     "make_unique_experiment_dir=false"
-    "algo.skill_block_size=32"
+    "algo.skill_block_size=48"
     "algo.downsample_factor=4"
+    "algo.encoder.lowdim.encoder_type_by_modality.left_force_history=mlp"
+    "algo.encoder.lowdim.encoder_type_by_modality.right_force_history=mlp"
     "seed=0"
     "data_prefix=${data_prefix}"
+    "task.instruction_path=${data_prefix}/instructions.json"
+    "+algo.dataset.pi_stats_path=${pi_stats_path}"
     "device=${device}"
 )
 
 autoencoder_exp_name="lowdim_autoencoder_${run_key}"
 autoencoder_checkpoint_dir="./experiments/real_robot/REAL_ROBOT_MULTI/${algo_name}/${autoencoder_exp_name}/${variant}/0/stage_0"
 
-echo "[stage0-only] variant=${variant}"
-echo "[stage0-only] mask_mode=${mask_mode}"
-echo "[stage0-only] norm_mode=${norm_mode}"
-echo "[stage0-only] checkpoint=${autoencoder_checkpoint_dir}"
+echo "[stage0-only:pi] variant=${variant}"
+echo "[stage0-only:pi] mask_mode=${mask_mode}"
+echo "[stage0-only:pi] pi_stats=${pi_stats_path}"
+echo "[stage0-only:pi] checkpoint=${autoencoder_checkpoint_dir}"
+wait_for_gpu_if_needed
 python train.py --config-name=train_autoencoder.yaml \
     "algo=${algo}" \
     "variant_name=${variant}" \
-    "task=real_robot_state" \
+    "task=real_robot_state_pi" \
     "exp_name=${autoencoder_exp_name}" \
     "logging.group=autoencoder_${run_key}" \
     "${common_args[@]}" \
