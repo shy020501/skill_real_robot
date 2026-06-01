@@ -55,6 +55,8 @@ class SkillVAE(nn.Module):
                  fsq_level,
                  codebook_dim,
                  codebook_size,
+                 input_action_dim=None,
+                 output_action_dim=None,
                  ):
         super().__init__()
         self.encoder_dim = encoder_dim
@@ -65,6 +67,9 @@ class SkillVAE(nn.Module):
         self.use_causal_decoder = use_causal_decoder
         self.vq_type = vq_type
         self.fsq_level = fsq_level
+        self.action_dim = action_dim
+        self.input_action_dim = action_dim if input_action_dim is None else input_action_dim
+        self.output_action_dim = action_dim if output_action_dim is None else output_action_dim
 
         assert int(np.log2(downsample_factor)) == np.log2(downsample_factor), 'downsample_factor must be a power of 2'
         strides = [2] * int(np.log2(downsample_factor)) + [1]
@@ -81,8 +86,8 @@ class SkillVAE(nn.Module):
             self.vq = FSQ(dim=encoder_dim, levels=fsq_level)
         else:
             raise NotImplementedError('Unknown vq_type')
-        self.action_proj = nn.Linear(action_dim, encoder_dim)
-        self.action_head = nn.Linear(decoder_dim, action_dim)
+        self.action_proj = nn.Linear(self.input_action_dim, encoder_dim)
+        self.action_head = nn.Linear(decoder_dim, self.output_action_dim)
         self.conv_block = ResidualTemporalBlock(
             encoder_dim, encoder_dim, kernel_size=kernel_sizes, 
             stride=strides, causal=use_causal_encoder)

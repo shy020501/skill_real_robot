@@ -7,6 +7,8 @@ policy:
   autoencoder:
     _target_: quest.algos.quest_modules.skill_vae.SkillVAEFTAdaLN
     action_dim: ${task.shape_meta.action_dim}
+    input_action_dim: null
+    output_action_dim: null
     encoder_dim: 256
     decoder_dim: 256
     skill_block_size: ${algo.skill_block_size}
@@ -44,6 +46,7 @@ policy:
   loss_fn:
     _target_: torch.nn.L1Loss
   l1_loss_scale: ${algo.l1_loss_scale}
+  action_target_key: actions
   action_horizon: ${algo.action_horizon}
   obs_reduction: cat
   device: ${device}

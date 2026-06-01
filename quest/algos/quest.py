@@ -14,6 +14,7 @@ class QueST(ChunkPolicy):
                  stage,
                  loss_fn,
                  l1_loss_scale,
+                 action_target_key="actions",
                  **kwargs
                  ):
         super().__init__(**kwargs)
@@ -24,6 +25,7 @@ class QueST(ChunkPolicy):
         self.start_token = self.policy_prior.start_token
         self.l1_loss_scale = l1_loss_scale if stage == 2 else 0
         self.codebook_size = np.array(autoencoder.fsq_level).prod()
+        self.action_target_key = action_target_key
         
         self.loss = loss_fn
 
@@ -36,6 +38,11 @@ class QueST(ChunkPolicy):
         if getattr(self.autoencoder, "use_ft_conditioning", False):
             return self.autoencoder.get_indices(data["actions"], ft=data.get("masked_ft"))
         return self.autoencoder.get_indices(data["actions"])
+
+    def _action_target(self, data):
+        if self.action_target_key not in data:
+            raise KeyError(f"Batch is missing action target key '{self.action_target_key}'.")
+        return data[self.action_target_key]
         
     def get_optimizers(self):
         if self.stage == 0:
@@ -79,15 +86,17 @@ class QueST(ChunkPolicy):
 
     def compute_autoencoder_loss(self, data):
         pred, pp, pp_sample, aux_loss, _ = self._autoencoder_forward(data)
-        recon_loss = self.loss(pred, data["actions"])
+        target = self._action_target(data)
+        recon_loss = self.loss(pred, target)
         if self.autoencoder.vq_type == 'vq':
             loss = recon_loss + aux_loss
         else:
             loss = recon_loss
 
         with torch.no_grad():
-            target_gripper = data["actions"][..., -1]
-            pred_gripper = pred[..., -1]
+            gripper_idx = data["actions"].shape[-1] - 1
+            target_gripper = data["actions"][..., gripper_idx]
+            pred_gripper = pred[..., gripper_idx]
             target_gripper_active = target_gripper.abs() > 0.5
             pred_gripper_active = pred_gripper.abs() > 0.5
             gripper_active_count = target_gripper_active.sum()
@@ -128,7 +137,7 @@ class QueST(ChunkPolicy):
             sampled_indices = sampled_indices.view(-1,logits.shape[1])
         
         pred_actions = self.autoencoder.decode_actions(sampled_indices)
-        l1_loss = self.loss(pred_actions, data["actions"])
+        l1_loss = self.loss(pred_actions, self._action_target(data))
         total_loss = prior_loss + self.l1_loss_scale * l1_loss
         info = {
             'loss': total_loss.item(),

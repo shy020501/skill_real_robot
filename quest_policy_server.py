@@ -220,8 +220,8 @@ class QueSTPolicy:
 
         if key in FORCE_HISTORY_KEYS:
             history = value.squeeze().reshape(-1, value.shape[-1])
-            history = self.ft_filter.filter_history(key, history)
             history = normalize_lowdim_value(history, key, self.lowdim_stats)
+            history = self.ft_filter.filter_history(key, history)
             return history.reshape(original_shape).astype(np.float32)
 
         return normalize_lowdim_value(value, key, self.lowdim_stats)

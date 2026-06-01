@@ -5,13 +5,10 @@ import os
 
 import numpy as np
 
-from quest.utils.force_torque_utils import DEFAULT_FT_CONFIG
 from quest.utils.real_robot_utils import (
     FORCE_HISTORY_KEYS,
-    STATE_HISTORY_KEYS,
     get_obs_value_with_alias,
     load_task_episodes_from_pkls,
-    smooth_force_history_sequence,
 )
 
 
@@ -76,7 +73,7 @@ def extract_force_from_state(obs):
     return state[..., FORCE_STATE_IDXS]
 
 
-def collect_episode_values(episode, key, ft_config):
+def collect_episode_values(episode, key):
     observations = episode.get("observations", [])
     if len(observations) == 0:
         return None
@@ -92,8 +89,7 @@ def collect_episode_values(episode, key, ft_config):
             np.asarray(get_obs_value_with_alias(obs, key), dtype=np.float32).squeeze().reshape(-1, 6)
             for obs in observations
         ]
-        values = np.stack(values, axis=0)
-        return smooth_force_history_sequence(values, ft_config)
+        return np.stack(values, axis=0)
 
     values = [
         np.asarray(get_obs_value_with_alias(obs, key), dtype=np.float32).squeeze()
@@ -102,7 +98,7 @@ def collect_episode_values(episode, key, ft_config):
     return np.stack(values, axis=0)
 
 
-def compute_lowdim_stats(data_prefix, keys, ft_config):
+def compute_lowdim_stats(data_prefix, keys):
     task_names = sorted(
         name
         for name in os.listdir(data_prefix)
@@ -119,7 +115,7 @@ def compute_lowdim_stats(data_prefix, keys, ft_config):
 
         for episode in episodes:
             for key in keys:
-                values = collect_episode_values(episode, key, ft_config)
+                values = collect_episode_values(episode, key)
                 if values is None:
                     continue
                 dim = values.shape[-1]
@@ -161,23 +157,11 @@ def main():
         default=list(DEFAULT_KEYS),
         help="Lowdim keys to include.",
     )
-    parser.add_argument("--history_filter", default=DEFAULT_FT_CONFIG["history_filter"])
-    parser.add_argument("--history_sample_rate_hz", type=float, default=DEFAULT_FT_CONFIG["history_sample_rate_hz"])
-    parser.add_argument("--history_cutoff_hz", type=float, default=DEFAULT_FT_CONFIG["history_cutoff_hz"])
-    parser.add_argument("--history_filter_order", type=int, default=DEFAULT_FT_CONFIG["history_filter_order"])
     args = parser.parse_args()
 
     data_prefix = os.path.abspath(args.data_prefix)
     output_path = args.output or os.path.join(data_prefix, "lowdim_stats.json")
-    ft_config = {
-        **DEFAULT_FT_CONFIG,
-        "history_filter": args.history_filter,
-        "history_sample_rate_hz": args.history_sample_rate_hz,
-        "history_cutoff_hz": args.history_cutoff_hz,
-        "history_filter_order": args.history_filter_order,
-    }
-
-    stats = compute_lowdim_stats(data_prefix, args.keys, ft_config)
+    stats = compute_lowdim_stats(data_prefix, args.keys)
     with open(output_path, "w") as f:
         json.dump(stats, f, indent=4)
         f.write("\n")

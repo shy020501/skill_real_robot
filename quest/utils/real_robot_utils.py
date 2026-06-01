@@ -19,6 +19,7 @@ from quest.utils.force_torque_utils import (
     compute_mask_sequence,
     extract_force_history_sequence,
     extract_ft_sequence,
+    extract_right_ft_from_state,
     load_ft_stats_from_lowdim_json,
     load_global_ft_stats_from_json,
     reduce_force_history,
@@ -517,6 +518,7 @@ class RealWorldSequenceDataset(Dataset):
         ft_shift: int = 1,
         lowdim_stats: Optional[Dict] = None,
         load_obs: bool = True,
+        action_target_mode: str = "actions",
     ):
         self.episodes = episodes
         self.obs_keys = obs_keys
@@ -529,8 +531,12 @@ class RealWorldSequenceDataset(Dataset):
         self.use_ft = use_ft
         self.ft_shift = ft_shift
         self.load_obs = load_obs
+        self.action_target_mode = action_target_mode
         self.ft_config = {**DEFAULT_FT_CONFIG, **(ft_config or {})}
         self.lowdim_stats = lowdim_stats
+
+        if self.action_target_mode not in ("actions", "action_force", "action_force_norm"):
+            raise ValueError(f"Unsupported action_target_mode: {self.action_target_mode}")
 
         self.n_demos = len(episodes)
 
@@ -555,7 +561,7 @@ class RealWorldSequenceDataset(Dataset):
 
         self.masked_ft_episodes = None
         self.ft_mask_episodes = None
-        self.smoothed_state_ft_episodes = None
+        self.state_ft_episodes = None
         self.force_history_episodes = None
         self.smoothed_force_history_episodes = None
         needs_state_ft = self.use_ft and self.ft_config["ft_source"] == "state"
@@ -565,12 +571,10 @@ class RealWorldSequenceDataset(Dataset):
         if self.use_ft and self.ft_config["ft_source"] in FORCE_HISTORY_KEYS:
             force_history_keys.add(self.ft_config["ft_source"])
         if needs_state_ft:
-            self.smoothed_state_ft_episodes = []
-            for ep in self.episodes:
-                state_ft = extract_ft_sequence(ep)
-                self.smoothed_state_ft_episodes.append(
-                    smooth_ft_sequence(state_ft, ema_alpha=self.ft_config["ema_alpha"])
-                )
+            self.state_ft_episodes = [
+                extract_ft_sequence(ep)
+                for ep in self.episodes
+            ]
 
         if force_history_keys:
             self.force_history_episodes = {}
@@ -581,9 +585,40 @@ class RealWorldSequenceDataset(Dataset):
                 for ep in self.episodes:
                     force_history = extract_force_history_sequence(ep, force_history_key=force_history_key)
                     raw_episodes.append(force_history)
-                    smoothed_episodes.append(smooth_force_history_sequence(force_history, self.ft_config))
+                    normalized_force_history = normalize_lowdim_value(
+                        force_history,
+                        force_history_key,
+                        self.lowdim_stats,
+                    )
+                    smoothed_episodes.append(
+                        smooth_force_history_sequence(normalized_force_history, self.ft_config)
+                    )
                 self.force_history_episodes[force_history_key] = raw_episodes
                 self.smoothed_force_history_episodes[force_history_key] = smoothed_episodes
+
+        self.action_target_episodes = None
+        if self.action_target_mode == "action_force":
+            self.action_target_episodes = []
+            for ep_idx, ep in enumerate(self.episodes):
+                actions = ep.get("actions", [])
+                observations = ep.get("observations", [])
+                if len(actions) != len(observations):
+                    raise ValueError(
+                        f"Episode {ep_idx} has {len(actions)} actions but {len(observations)} observations."
+                    )
+                targets = []
+                for action, obs in zip(actions, observations):
+                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)[7:]
+                    if "state" not in obs:
+                        raise KeyError("action_force target requires observation key 'state'.")
+                    state_force = extract_right_ft_from_state(obs["state"])
+                    targets.append(np.concatenate([action_arr, state_force], axis=0).astype(np.float32))
+                self.action_target_episodes.append(targets)
+
+        if self.action_target_mode == "action_force_norm" and (
+            not self.use_ft or self.ft_config["ft_source"] != "state"
+        ):
+            raise ValueError("action_force_norm target requires use_ft=True and ft_source='state'.")
 
         if self.use_ft:
             if ft_stats is None:
@@ -592,7 +627,8 @@ class RealWorldSequenceDataset(Dataset):
             self.ft_mask_episodes = []
             for ep_idx, _ in enumerate(self.episodes):
                 if self.ft_config["ft_source"] == "state":
-                    ft = normalize_ft_sequence(self.smoothed_state_ft_episodes[ep_idx], ft_stats)
+                    ft = normalize_ft_sequence(self.state_ft_episodes[ep_idx], ft_stats)
+                    ft = smooth_ft_sequence(ft, ema_alpha=self.ft_config["ema_alpha"])
                     if self.ft_config["use_threshold_mask"]:
                         _, ft_mask = compute_mask_sequence(ft, config=self.ft_config)
                         masked_ft = ft * ft_mask.astype(np.float32)
@@ -602,9 +638,10 @@ class RealWorldSequenceDataset(Dataset):
                 elif self.ft_config["ft_source"] in FORCE_HISTORY_KEYS:
                     ft_source = self.ft_config["ft_source"]
                     ft = normalize_ft_sequence(
-                        self.smoothed_force_history_episodes[ft_source][ep_idx],
+                        self.force_history_episodes[ft_source][ep_idx],
                         ft_stats,
                     )
+                    ft = smooth_force_history_sequence(ft, self.ft_config)
                     if self.ft_config["use_threshold_mask"]:
                         ft_mask = threshold_mask_force_history_sequence(ft, self.ft_config)
                         masked_ft = ft * ft_mask
@@ -618,6 +655,22 @@ class RealWorldSequenceDataset(Dataset):
                     raise ValueError(f"Unsupported ft_source: {self.ft_config['ft_source']}")
                 self.masked_ft_episodes.append(masked_ft)
                 self.ft_mask_episodes.append(ft_mask.astype(np.float32))
+
+        if self.action_target_mode == "action_force_norm":
+            self.action_target_episodes = []
+            for ep_idx, ep in enumerate(self.episodes):
+                actions = ep.get("actions", [])
+                force_targets = self.masked_ft_episodes[ep_idx]
+                if len(actions) != len(force_targets):
+                    raise ValueError(
+                        f"Episode {ep_idx} has {len(actions)} actions but {len(force_targets)} force targets."
+                    )
+                targets = []
+                for action, force_target in zip(actions, force_targets):
+                    action_arr = np.asarray(action, dtype=np.float32).reshape(-1)[7:]
+                    force_arr = np.asarray(force_target, dtype=np.float32).reshape(-1)
+                    targets.append(np.concatenate([action_arr, force_arr], axis=0).astype(np.float32))
+                self.action_target_episodes.append(targets)
 
         if not self.load_obs:
             for ep in self.episodes:
@@ -666,6 +719,14 @@ class RealWorldSequenceDataset(Dataset):
             action_seq = self._slice_with_padding(action_list, start_t, self.seq_length)
             ret["actions"] = np.stack(action_seq, axis=0).astype(np.float32)
 
+        if self.action_target_episodes is not None:
+            target_seq = self._slice_with_padding(
+                self.action_target_episodes[ep_idx],
+                start_t,
+                self.seq_length,
+            )
+            ret["action_targets"] = np.stack(target_seq, axis=0).astype(np.float32)
+
         if self.use_ft:
             ft_len = len(self.masked_ft_episodes[ep_idx])
             ft_start_t = min(start_t + self.ft_shift, ft_len - 1)
@@ -703,17 +764,23 @@ class RealWorldSequenceDataset(Dataset):
 
             obs_list = []
             for t, obs_t in enumerate(observations):
+                force_history_is_preprocessed = False
                 if (
                     key in FORCE_HISTORY_KEYS
                     and self.smoothed_force_history_episodes is not None
                     and key in self.smoothed_force_history_episodes
                 ):
                     arr = self.smoothed_force_history_episodes[key][ep_idx][t]
+                    force_history_is_preprocessed = True
                 else:
                     arr = np.asarray(get_obs_value_with_alias(obs_t, key))
 
                 # history: keep (H, D) so sequence encoders can consume the temporal axis directly.
-                if key in FORCE_HISTORY_KEYS or key in STATE_HISTORY_KEYS:
+                if key in FORCE_HISTORY_KEYS:
+                    arr = arr.squeeze().astype(np.float32)
+                    if not force_history_is_preprocessed:
+                        arr = normalize_lowdim_value(arr, key, self.lowdim_stats)
+                elif key in STATE_HISTORY_KEYS:
                     arr = arr.squeeze().astype(np.float32)
                     arr = normalize_lowdim_value(arr, key, self.lowdim_stats)
 
@@ -791,6 +858,7 @@ def build_realworld_dataset(
     ft_shift: int = 1,
     lowdim_stats_path: Optional[str] = None,
     load_obs: bool = True,
+    action_target_mode: str = "actions",
 ):
     """
     data_prefix 예:
@@ -908,6 +976,7 @@ def build_realworld_dataset(
             ft_shift=ft_shift,
             lowdim_stats=lowdim_stats,
             load_obs=load_obs,
+            action_target_mode=action_target_mode,
         )
         manip_datasets.append(ds)
 
