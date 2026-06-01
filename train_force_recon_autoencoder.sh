@@ -134,6 +134,7 @@ extra_args=(
     "algo.policy.autoencoder.output_action_dim=13"
     "task.shape_meta.action_dim=13"
     "+task.dataset.action_target_mode=action_force_norm"
+    "+task.dataset.leading_keep=32"
     "algo.dataset.ft_shift=0"
     "algo.dataset.ft_config.ema_alpha=null"
 )

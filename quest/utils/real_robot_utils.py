@@ -20,6 +20,8 @@ from quest.utils.force_torque_utils import (
     extract_force_history_sequence,
     extract_ft_sequence,
     extract_right_ft_from_state,
+    RIGHT_FORCE_SLICE,
+    RIGHT_TORQUE_SLICE,
     load_ft_stats_from_lowdim_json,
     load_global_ft_stats_from_json,
     reduce_force_history,
@@ -107,7 +109,11 @@ def get_task_embs(task_embedding_format, descriptions):
 # -------------------------------------------------
 # pkl -> episodes
 # -------------------------------------------------
-def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[Dict]:
+def load_task_episodes_from_pkls(
+    task_dir: str,
+    load_obs: bool = True,
+    leading_keep: Optional[int] = None,
+) -> List[Dict]:
     pkl_files = sorted(glob.glob(os.path.join(task_dir, "**/*.pkl"), recursive=True))
     print(f"[{os.path.basename(task_dir)}] Found pkl files: {len(pkl_files)}")
 
@@ -192,12 +198,36 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
             return tuple(copy_episode_value(v) for v in value)
         return value
 
+    def zero_state_force_torque(value):
+        state = np.asarray(value).copy()
+        flat_state = state.reshape(-1)
+        if flat_state.shape[0] >= RIGHT_TORQUE_SLICE.stop:
+            flat_state[RIGHT_FORCE_SLICE] = 0.0
+            flat_state[RIGHT_TORQUE_SLICE] = 0.0
+        return flat_state.reshape(state.shape)
+
+    def zero_observation_force_torque(obs):
+        if not isinstance(obs, dict):
+            return obs
+        obs = dict(obs)
+        if "state" in obs:
+            obs["state"] = zero_state_force_torque(obs["state"])
+        for force_history_key in FORCE_HISTORY_KEYS:
+            if force_history_key in obs:
+                obs[force_history_key] = zero_like_episode_value(obs[force_history_key])
+        return obs
+
+    def zero_leading_observation_force_torque(ep: Dict, leading_keep: int) -> None:
+        observations = ep.get("observations", [])
+        for i in range(min(leading_keep, len(observations))):
+            observations[i] = zero_observation_force_torque(observations[i])
+
     def leading_pad_episode_value(key, value):
         if key == "state":
-            return copy_episode_value(value)
+            return zero_state_force_torque(value)
         if isinstance(value, dict):
             return {
-                child_key: copy_episode_value(child_value)
+                child_key: zero_state_force_torque(child_value)
                 if child_key == "state"
                 else zero_like_episode_value(child_value)
                 for child_key, child_value in value.items()
@@ -264,6 +294,7 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
                 ] + trimmed_values
             trimmed_ep[k] = trimmed_values
 
+        zero_leading_observation_force_torque(trimmed_ep, leading_keep)
         return trimmed_ep
     
     for pkl_path in pkl_files:
@@ -286,8 +317,12 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
 
             if done:
                 ep = {k: cur[k] for k in keys}
-                ep = trim_zero_action_episode(ep, trailing_keep=5)
-                # ep = trim_zero_action_episode_with_leading_keep(ep, leading_keep=32, trailing_keep=5)
+                if leading_keep is None:
+                    ep = trim_zero_action_episode(ep, trailing_keep=5)
+                else:
+                    ep = trim_zero_action_episode_with_leading_keep(
+                        ep, leading_keep=leading_keep, trailing_keep=5
+                    )
                 if ep is not None and len(ep["actions"]) > 0:
                     force_initial_gripper_open(ep)
                     episodes.append(ep)
@@ -296,8 +331,12 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
         # 마지막 episode가 dones=True 없이 끝난 경우
         if len(cur) > 0 and len(next(iter(cur.values()))) > 0:
             ep = {k: cur[k] for k in keys}
-            ep = trim_zero_action_episode(ep, trailing_keep=5)
-            # ep = trim_zero_action_episode_with_leading_keep(ep, leading_keep=32, trailing_keep=5)
+            if leading_keep is None:
+                ep = trim_zero_action_episode(ep, trailing_keep=5)
+            else:
+                ep = trim_zero_action_episode_with_leading_keep(
+                    ep, leading_keep=leading_keep, trailing_keep=5
+                )
             if ep is not None and len(ep["actions"]) > 0:
                 force_initial_gripper_open(ep)
                 episodes.append(ep)
@@ -519,6 +558,7 @@ class RealWorldSequenceDataset(Dataset):
         lowdim_stats: Optional[Dict] = None,
         load_obs: bool = True,
         action_target_mode: str = "actions",
+        leading_keep: Optional[int] = None,
     ):
         self.episodes = episodes
         self.obs_keys = obs_keys
@@ -532,6 +572,7 @@ class RealWorldSequenceDataset(Dataset):
         self.ft_shift = ft_shift
         self.load_obs = load_obs
         self.action_target_mode = action_target_mode
+        self.leading_keep = leading_keep
         self.ft_config = {**DEFAULT_FT_CONFIG, **(ft_config or {})}
         self.lowdim_stats = lowdim_stats
 
@@ -661,6 +702,10 @@ class RealWorldSequenceDataset(Dataset):
             for ep_idx, ep in enumerate(self.episodes):
                 actions = ep.get("actions", [])
                 force_targets = self.masked_ft_episodes[ep_idx]
+                if self.leading_keep is not None:
+                    leading_zero_len = min(self.leading_keep, len(force_targets))
+                    if leading_zero_len > 0:
+                        force_targets[:leading_zero_len] = 0.0
                 if len(actions) != len(force_targets):
                     raise ValueError(
                         f"Episode {ep_idx} has {len(actions)} actions but {len(force_targets)} force targets."
@@ -859,6 +904,7 @@ def build_realworld_dataset(
     lowdim_stats_path: Optional[str] = None,
     load_obs: bool = True,
     action_target_mode: str = "actions",
+    leading_keep: Optional[int] = None,
 ):
     """
     data_prefix 예:
@@ -903,7 +949,9 @@ def build_realworld_dataset(
     descriptions = []
     for task_name in task_names:
         task_dir = os.path.join(data_prefix, task_name)
-        episodes = load_task_episodes_from_pkls(task_dir, load_obs=load_obs)
+        episodes = load_task_episodes_from_pkls(
+            task_dir, load_obs=load_obs, leading_keep=leading_keep
+        )
 
         if len(episodes) == 0:
             print(f"[WARNING] Skip empty task: {task_name}")
@@ -977,6 +1025,7 @@ def build_realworld_dataset(
             lowdim_stats=lowdim_stats,
             load_obs=load_obs,
             action_target_mode=action_target_mode,
+            leading_keep=leading_keep,
         )
         manip_datasets.append(ds)
 
