@@ -286,20 +286,20 @@ def load_task_episodes_from_pkls(task_dir: str, load_obs: bool = True) -> List[D
 
             if done:
                 ep = {k: cur[k] for k in keys}
-                force_initial_gripper_open(ep)
                 ep = trim_zero_action_episode(ep, trailing_keep=5)
                 # ep = trim_zero_action_episode_with_leading_keep(ep, leading_keep=32, trailing_keep=5)
                 if ep is not None and len(ep["actions"]) > 0:
+                    force_initial_gripper_open(ep)
                     episodes.append(ep)
                 cur = defaultdict(list)
 
         # 마지막 episode가 dones=True 없이 끝난 경우
         if len(cur) > 0 and len(next(iter(cur.values()))) > 0:
             ep = {k: cur[k] for k in keys}
-            force_initial_gripper_open(ep)
             ep = trim_zero_action_episode(ep, trailing_keep=5)
             # ep = trim_zero_action_episode_with_leading_keep(ep, leading_keep=32, trailing_keep=5)
             if ep is not None and len(ep["actions"]) > 0:
+                force_initial_gripper_open(ep)
                 episodes.append(ep)
 
         del data, step, value
