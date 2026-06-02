@@ -23,6 +23,7 @@ task_agnostic_norm_stats_path="/NHNHOME/WORKSPACE/0226010443_A/seunghyo/real_rob
 ft_rate="10hz"
 mask_mode="unmasked"
 norm_mode="task-wise"
+downsample_factor="${DOWNSAMPLE_FACTOR:-4}"
 shift 2
 
 while [[ $# -gt 0 ]]; do
@@ -50,6 +51,15 @@ if [[ ! -d "${data_prefix}" ]]; then
     echo "Data prefix does not exist: ${data_prefix}"
     exit 1
 fi
+
+case "${downsample_factor}" in
+    1|2|4|8|16|32)
+        ;;
+    *)
+        echo "Unsupported DOWNSAMPLE_FACTOR='${downsample_factor}'. Expected a power of two in: 1 2 4 8 16 32"
+        exit 1
+        ;;
+esac
 
 case "${ft_rate}" in
     10hz)
@@ -103,18 +113,18 @@ case "${mask_mode}" in
 esac
 
 extra_args=()
-run_key="${variant_key}"
+run_key="${variant_key}_ds_${downsample_factor}"
 case "${variant_key}" in
     quest)
         algo="quest"
         algo_name="quest"
-        variant="${variant_prefix}block_32_ds_4_quest"
-        # variant="${variant_prefix}block_32_ds_4_quest_32_zero"
+        variant="${variant_prefix}block_32_ds_${downsample_factor}_quest_32_zero"
+        extra_args+=("+task.dataset.leading_keep=32")
         ;;
     max|avg|avg_max|conv)
         algo="quest_ft_adaln"
         algo_name="quest_ft_adaln"
-        variant="${variant_prefix}block_32_ds_4_ft_${variant_key}"
+        variant="${variant_prefix}block_32_ds_${downsample_factor}_ft_${variant_key}"
         extra_args+=("algo.ft_downsample_mode=${variant_key}")
         extra_args+=("algo.dataset.ft_config.ft_source=${ft_source}")
         extra_args+=("algo.dataset.ft_config.use_threshold_mask=${use_threshold_mask}")
@@ -126,7 +136,7 @@ case "${variant_key}" in
             extra_args+=("algo.ft_conv_strides=[5,4,2]")
             extra_args+=("algo.ft_conv_kernel_sizes=[9,7,5]")
         fi
-        run_key="${variant_key}_${ft_label}${norm_label}"
+        run_key="${variant_key}_ds_${downsample_factor}_${ft_label}${norm_label}"
         ;;
     *)
         echo "Unknown variant '${variant_key}'. Expected one of: quest, max, avg, avg_max, conv"
@@ -143,7 +153,7 @@ common_args=(
     "train_dataloader.multiprocessing_context=fork"
     "make_unique_experiment_dir=false"
     "algo.skill_block_size=32"
-    "algo.downsample_factor=4"
+    "algo.downsample_factor=${downsample_factor}"
     "seed=0"
     "data_prefix=${data_prefix}"
     "device=${device}"
@@ -155,6 +165,7 @@ autoencoder_checkpoint_dir="./experiments/real_robot/REAL_ROBOT_MULTI/${algo_nam
 echo "[stage0-only] variant=${variant}"
 echo "[stage0-only] mask_mode=${mask_mode}"
 echo "[stage0-only] norm_mode=${norm_mode}"
+echo "[stage0-only] downsample_factor=${downsample_factor}"
 echo "[stage0-only] checkpoint=${autoencoder_checkpoint_dir}"
 python train.py --config-name=train_autoencoder.yaml \
     "algo=${algo}" \

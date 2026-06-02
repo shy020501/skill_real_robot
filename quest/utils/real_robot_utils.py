@@ -558,6 +558,7 @@ class RealWorldSequenceDataset(Dataset):
         lowdim_stats: Optional[Dict] = None,
         load_obs: bool = True,
         action_target_mode: str = "actions",
+        action_input_mode: str = "actions",
         leading_keep: Optional[int] = None,
     ):
         self.episodes = episodes
@@ -572,12 +573,15 @@ class RealWorldSequenceDataset(Dataset):
         self.ft_shift = ft_shift
         self.load_obs = load_obs
         self.action_target_mode = action_target_mode
+        self.action_input_mode = action_input_mode
         self.leading_keep = leading_keep
         self.ft_config = {**DEFAULT_FT_CONFIG, **(ft_config or {})}
         self.lowdim_stats = lowdim_stats
 
         if self.action_target_mode not in ("actions", "action_force", "action_force_norm"):
             raise ValueError(f"Unsupported action_target_mode: {self.action_target_mode}")
+        if self.action_input_mode not in ("actions", "state_force", "state_force_norm"):
+            raise ValueError(f"Unsupported action_input_mode: {self.action_input_mode}")
 
         self.n_demos = len(episodes)
 
@@ -660,6 +664,29 @@ class RealWorldSequenceDataset(Dataset):
             not self.use_ft or self.ft_config["ft_source"] != "state"
         ):
             raise ValueError("action_force_norm target requires use_ft=True and ft_source='state'.")
+
+        self.action_input_episodes = None
+        if self.action_input_mode in ("state_force", "state_force_norm"):
+            self.action_input_episodes = []
+            for ep_idx, ep in enumerate(self.episodes):
+                actions = ep.get("actions", [])
+                observations = ep.get("observations", [])
+                if len(actions) != len(observations):
+                    raise ValueError(
+                        f"Episode {ep_idx} has {len(actions)} actions but {len(observations)} observations."
+                    )
+                inputs = []
+                for obs in observations:
+                    if "state" not in obs:
+                        raise KeyError(f"{self.action_input_mode} input requires observation key 'state'.")
+                    force = extract_right_ft_from_state(obs["state"])
+                    if self.action_input_mode == "state_force_norm":
+                        force = normalize_lowdim_value(force, "force", self.lowdim_stats)
+                    inputs.append(force.astype(np.float32))
+                if self.leading_keep is not None:
+                    for i in range(min(self.leading_keep, len(inputs))):
+                        inputs[i] = np.zeros_like(inputs[i], dtype=np.float32)
+                self.action_input_episodes.append(inputs)
 
         if self.use_ft:
             if ft_stats is None:
@@ -756,10 +783,13 @@ class RealWorldSequenceDataset(Dataset):
         # -------------------------
         if "actions" in self.dataset_keys:
             action_list = []
-            for x in ep["actions"]:
-                arr = np.asarray(x).astype(np.float32)   # (14,)
-                arr = arr[7:]                            # -> (7,)
-                action_list.append(arr)
+            if self.action_input_episodes is not None:
+                action_list = self.action_input_episodes[ep_idx]
+            else:
+                for x in ep["actions"]:
+                    arr = np.asarray(x).astype(np.float32)   # (14,)
+                    arr = arr[7:]                            # -> (7,)
+                    action_list.append(arr)
 
             action_seq = self._slice_with_padding(action_list, start_t, self.seq_length)
             ret["actions"] = np.stack(action_seq, axis=0).astype(np.float32)
@@ -904,6 +934,7 @@ def build_realworld_dataset(
     lowdim_stats_path: Optional[str] = None,
     load_obs: bool = True,
     action_target_mode: str = "actions",
+    action_input_mode: str = "actions",
     leading_keep: Optional[int] = None,
 ):
     """
@@ -1025,6 +1056,7 @@ def build_realworld_dataset(
             lowdim_stats=lowdim_stats,
             load_obs=load_obs,
             action_target_mode=action_target_mode,
+            action_input_mode=action_input_mode,
             leading_keep=leading_keep,
         )
         manip_datasets.append(ds)
